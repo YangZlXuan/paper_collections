@@ -1,0 +1,204 @@
+{
+  "schema_version": 1,
+  "publishers": [
+    {
+      "id": "springer",
+      "name": "Springer Nature（施普林格·自然集团）",
+      "enabled": true,
+      "journals": [
+        "Nature Energy",
+        "Nature",
+        "Nature Catalysis",
+        "Nature Materials",
+        "Nature Nanotechnology",
+        "Nature Chemistry",
+        "Nature Synthesis",
+        "Nature Communications",
+        "npj Computational Materials",
+        "Rare Metals",
+        "Science China Chemistry",
+        "Journal of Analysis and Testing",
+        "Nano Research",
+        "Communications Materials",
+        "Science China Materials"
+      ]
+    },
+    {
+      "id": "elsevier",
+      "name": "Elsevier（爱思唯尔）",
+      "enabled": true,
+      "journals": [
+        "eScience",
+        "Joule",
+        "Advanced Powder Materials",
+        "Materials Today",
+        "Science Bulletin",
+        "Nano Materials Science",
+        "EnergyChem",
+        "Applied Catalysis B: Environment and Energy",
+        "Energy Storage Materials",
+        "Chem",
+        "Chinese Journal of Catalysis",
+        "Journal of Advanced Research",
+        "Journal of Materials Science & Technology",
+        "Nano Energy",
+        "Matter",
+        "Journal of Energy Chemistry",
+        "Composites Part B: Engineering",
+        "Acta Physico-Chimica Sinica（2025 年起英文新版）",
+        "Carbon",
+        "Chemical Engineering Journal",
+        "Advanced Sensor and Energy Materials",
+        "Acta Materialia",
+        "Chem Catalysis",
+        "Nano Today",
+        "Chinese Journal of Structural Chemistry",
+        "Corrosion Science",
+        "Sustainable Materials and Technologies",
+        "Journal of Colloid and Interface Science",
+        "Journal of Rare Earths",
+        "Chinese Chemical Letters",
+        "Materials Today Sustainability",
+        "Materials Today Physics",
+        "International Journal of Hydrogen Energy",
+        "Sensors and Actuators B: Chemical",
+        "Composites Part A: Applied Science and Manufacturing",
+        "Materials Today Energy",
+        "Applied Materials Today",
+        "Cell Reports Physical Science",
+        "Journal of Alloys and Compounds",
+        "Applied Surface Science",
+        "Electrochimica Acta"
+      ]
+    },
+    {
+      "id": "wiley",
+      "name": "Wiley（威立出版社）",
+      "enabled": true,
+      "journals": [
+        "Advanced Materials",
+        "Advanced Energy Materials",
+        "Carbon Energy",
+        "Advanced Functional Materials",
+        "InfoMat",
+        "SusMat",
+        "Angewandte Chemie International Edition",
+        "Aggregate",
+        "SmartMat",
+        "Advanced Science",
+        "Energy & Environmental Materials",
+        "Small",
+        "Small Structures",
+        "Small Methods",
+        "Small Science",
+        "ChemSusChem",
+        "ChemElectroChem"
+      ]
+    },
+    {
+      "id": "acs",
+      "name": "ACS（美国化学会）",
+      "enabled": false,
+      "journals": [
+        "ACS Energy Letters",
+        "ACS Nano",
+        "Journal of the American Chemical Society",
+        "ACS Catalysis",
+        "ACS Central Science",
+        "ACS Sensors",
+        "Nano Letters",
+        "ACS Materials Letters",
+        "JACS Au",
+        "Analytical Chemistry",
+        "Chemistry of Materials",
+        "ACS Applied Nano Materials",
+        "ACS Applied Energy Materials",
+        "ACS Omega"
+      ]
+    },
+    {
+      "id": "rsc",
+      "name": "RSC（英国皇家化学会）",
+      "enabled": false,
+      "journals": [
+        "Energy & Environmental Science",
+        "Materials Horizons",
+        "Green Chemistry",
+        "Journal of Materials Chemistry A",
+        "Chemical Science",
+        "Materials Chemistry Frontiers",
+        "Nanoscale Horizons",
+        "Journal of Materials Chemistry B",
+        "RSC Advances",
+        "Journal of Materials Chemistry C"
+      ]
+    },
+    {
+      "id": "aaas",
+      "name": "AAAS（美国科学促进会）",
+      "enabled": false,
+      "journals": [
+        "Science",
+        "Energy Material Advances",
+        "Science Advances",
+        "Research"
+      ]
+    },
+    {
+      "id": "tsinghua",
+      "name": "清华大学出版社（SciOpen）",
+      "enabled": false,
+      "journals": [
+        "Nano Research Energy"
+      ]
+    },
+    {
+      "id": "oicc",
+      "name": "OICC Press",
+      "enabled": false,
+      "journals": [
+        "Journal of Nanostructure in Chemistry"
+      ]
+    },
+    {
+      "id": "oxford",
+      "name": "Oxford University Press（牛津大学出版社）",
+      "enabled": false,
+      "journals": [
+        "National Science Review"
+      ]
+    },
+    {
+      "id": "maximum_academic",
+      "name": "Maximum Academic Press",
+      "enabled": false,
+      "journals": [
+        "Progress in Reaction Kinetics and Mechanism"
+      ]
+    },
+    {
+      "id": "oae",
+      "name": "OAE Publishing",
+      "enabled": false,
+      "journals": [
+        "Energy Materials"
+      ]
+    },
+    {
+      "id": "nas",
+      "name": "美国国家科学院（NAS）",
+      "enabled": false,
+      "journals": [
+        "Proceedings of the National Academy of Sciences of the USA（PNAS）"
+      ]
+    },
+    {
+      "id": "ccs",
+      "name": "中国化学会（CCS Publishing）",
+      "enabled": false,
+      "journals": [
+        "CCS Chemistry"
+      ]
+    }
+  ]
+}

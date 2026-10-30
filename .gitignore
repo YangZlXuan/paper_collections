@@ -1,0 +1,41 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+downloads/
+.idea/
+cookies/
+cookies*.txt
+*.cookies
+
+# Local secrets, settings, and credential backups
+.env
+.env.*
+!.env.example
+*.credentials.json
+*.credentials.json.*
+settings.json
+settings.json.*
+*.log
+*.pem
+*.key
+cookies*.json
+*_cookies.txt
+*_cookies.json
+Cookies/
+Cookies*.txt
+Cookies*.json
+
+# Private research inputs and generated download records
+private/
+local-data/
+manifest.json
+manifest_*.csv
+parsed_references.csv
+article.pdf
+
+# Local audit notes may contain personal paths and usage history
+/security_best_practices_report.md
