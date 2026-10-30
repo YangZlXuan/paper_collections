@@ -107,3 +107,8 @@ def clear_elsevier_credentials() -> None:
 def load_wiley_credentials() -> dict[str, str]:
     """Wiley uses only the user-selected environment variable, never a local key file."""
     return {"api_key": os.environ.get("WileyKey", "").strip()}
+
+
+def load_springer_meta_credentials() -> dict[str, str]:
+    """Read the metadata-search key separately from publisher download credentials."""
+    return {"api_key": os.environ.get("SpringerMetaKey", "").strip()}

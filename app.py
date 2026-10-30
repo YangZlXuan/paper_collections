@@ -27,10 +27,15 @@ def self_test(destination: Path) -> None:
     from paper_downloader.wiley_supplements import parse_components
     from paper_downloader.credentials import _crypt
     from paper_downloader.updates import LATEST_RELEASE_API, parse_version
+    from paper_downloader.search import SearchConfig, validate_search_config
     from paper_downloader.gui import DownloaderApp
 
     parse_version(__version__)
     assert parse_version("v1.10.0") > parse_version("v1.9.0")
+    for publisher in ("springer", "elsevier", "wiley"):
+        search_config = SearchConfig(publisher, "offline test", api_key="0" * 32)
+        validate_search_config(search_config)
+        assert search_config.api_key not in repr(search_config)
     catalog = load_catalog()
     assert catalog and any(p.id == "springer" and p.enabled for p in catalog)
     assert any(p.id == "elsevier" and p.enabled for p in catalog)
@@ -69,6 +74,7 @@ def self_test(destination: Path) -> None:
     assert config.include_supplements and config.interval == MIN_REQUEST_INTERVAL == 2.0
     assert article_url("10.1038/s41586-021-03819-2") == "https://www.nature.com/articles/s41586-021-03819-2"
     app = DownloaderApp(check_updates=False)
+    assert app.search_button.cget("text") == "关键词检索"
     app.withdraw()
     app.update_idletasks()
     app.update()
@@ -91,6 +97,8 @@ def self_test(destination: Path) -> None:
         "bibtexparser": bibtexparser.__version__,
         "import_formats": ["txt", "csv", "tsv", "xlsx", "ris", "bib", "bibtex"],
         "sciencedirect_link_parsing": True,
+        "keyword_search_publishers": ["springer", "elsevier", "wiley"],
+        "springer_search_credential_environment": "SpringerMetaKey",
         "download_mode": "publisher_pages_elsevier_api_wiley_tdm",
         "wiley_pdf_supported": True,
         "wiley_tdm_supplements_supported": False,

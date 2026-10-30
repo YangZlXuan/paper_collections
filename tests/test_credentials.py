@@ -65,6 +65,14 @@ class CredentialTests(unittest.TestCase):
         with patch.dict(os.environ, {"WileyKey": "", "ElsevierKey": "different-publisher"}):
             self.assertEqual(credentials.load_wiley_credentials(), {"api_key": ""})
 
+    def test_springer_meta_reads_own_environment_without_creating_a_file(self):
+        with patch.dict(os.environ, {"SpringerMetaKey": " synthetic-metadata-key ", "WileyKey": "other"}), \
+                patch.object(credentials, "credentials_path", side_effect=AssertionError("No local store")):
+            self.assertEqual(credentials.load_springer_meta_credentials(), {"api_key": "synthetic-metadata-key"})
+        with patch.dict(os.environ, {"SpringerMetaKey": "", "ElsevierKey": "other"}):
+            self.assertEqual(credentials.load_springer_meta_credentials(), {"api_key": ""})
+        self.assertFalse(self.path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

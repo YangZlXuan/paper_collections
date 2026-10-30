@@ -28,6 +28,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.credential_save_patch = patch.object(gui, "save_elsevier_credentials")
         self.credential_clear_patch = patch.object(gui, "clear_elsevier_credentials")
         self.wiley_credential_load_patch = patch.object(gui, "load_wiley_credentials", return_value={"api_key": ""})
+        self.springer_credential_load_patch = patch.object(gui, "load_springer_meta_credentials", return_value={"api_key": ""})
         self.load_patch.start()
         self.saved = self.save_patch.start()
         self.errors = self.error_patch.start()
@@ -35,6 +36,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.credential_save = self.credential_save_patch.start()
         self.credential_clear = self.credential_clear_patch.start()
         self.wiley_credential_load = self.wiley_credential_load_patch.start()
+        self.springer_credential_load_patch.start()
         self.addCleanup(self.load_patch.stop)
         self.addCleanup(self.save_patch.stop)
         self.addCleanup(self.error_patch.stop)
@@ -42,6 +44,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.addCleanup(self.credential_save_patch.stop)
         self.addCleanup(self.credential_clear_patch.stop)
         self.addCleanup(self.wiley_credential_load_patch.stop)
+        self.addCleanup(self.springer_credential_load_patch.stop)
         try:
             self.app = gui.DownloaderApp(check_updates=False)
         except tk.TclError as exc:

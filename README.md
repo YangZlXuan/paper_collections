@@ -1,6 +1,6 @@
 # 论文批量下载助手
 
-Python 桌面软件，导入 DOI 文件、RIS / BibTeX 引文和 ScienceDirect 文章链接，解析、去重并批量下载。当前版本为 1.8.0：支持启动后台检查更新及手动检查；Springer / Nature 支持正文 PDF 和补充材料；Elsevier / ScienceDirect 通过官方 API 下载正文 PDF 和补充材料（SI）；Wiley 正文通过官方 TDM API 下载，SI 通过 Crossref 元数据辅助发现并尝试获取。其余出版社可导入、预览和导出清单，下载入口暂未启用。
+Python 桌面软件，导入 DOI 文件、RIS / BibTeX 引文和 ScienceDirect 文章链接，解析、去重并批量下载。当前版本为 1.9.1：支持官方接口关键词检索、结果预览、按期刊筛选与选择导入，保留启动后台检查更新及手动检查；Springer / Nature 支持正文 PDF 和补充材料；Elsevier / ScienceDirect 通过官方 API 下载正文 PDF 和补充材料（SI）；Wiley 正文通过官方 TDM API 下载，SI 通过 Crossref 元数据辅助发现并尝试获取。其余出版社可导入、预览和导出清单，下载入口暂未启用。
 
 ## 直接使用 EXE
 
@@ -11,15 +11,45 @@ Python 桌面软件，导入 DOI 文件、RIS / BibTeX 引文和 ScienceDirect �
 运行 `PaperDownloader.exe` 即可使用，无需安装 Python 或 Conda。更新时请先完成当前任务并关闭旧版，再启动新版。EXE 可单独复制到其他 Windows 64 位电脑运行。
 
 1. 选择 **Springer Nature**、**Elsevier** 或 **Wiley**，选择一本期刊或“全部期刊（该出版社）”。可在期刊框输入关键词后展开列表选择。
-2. 选择文献文件，软件自动解析并去重。支持 TXT、CSV、TSV、XLSX、RIS、BIB / BIBTEX；也可直接粘贴 DOI 或 ScienceDirect 文章链接进行解析。导入的标题、期刊、DOI、PII 和链接可在列表和详情中查看，整理后的清单可导出为 CSV。
-3. Elsevier 自动读取当前用户环境变量 **`ElsevierKey`**，Wiley 自动读取 **`WileyKey`**，无需在界面重复填写。Springer 可在访问设置中选择 Netscape 格式 Cookie、填写可选联系邮箱；机构提供 Elsevier Insttoken 时也可在这里填写。设置环境变量后需重新启动软件；通过终端或 IDE 启动时也需重启终端或 IDE。
+2. 选择文献文件，软件自动解析并去重。支持 TXT、CSV、TSV、XLSX、RIS、BIB / BIBTEX；也可直接粘贴 DOI 或 ScienceDirect 文章链接进行解析。或者点击“关键词检索”，填写关键词、可选年份与获取篇数，检索后选择记录导入。标题、期刊、DOI、PII 和链接可在列表和详情中查看，整理后的清单可导出为 CSV。
+3. Springer 关键词检索自动读取当前用户环境变量 **`SpringerMetaKey`**，Elsevier 读取 **`ElsevierKey`**，Wiley 正文下载读取 **`WileyKey`**，无需在界面重复填写。Springer 可在访问设置中选择 Netscape 格式 Cookie、填写可选联系邮箱；机构提供 Elsevier Insttoken 时也可在这里填写。设置环境变量后需重新启动软件；通过终端或 IDE 启动时也需重启终端或 IDE。
 4. 选择保存目录和“下载间隔（秒）”，按需勾选“下载补充材料”，点击“开始下载”。Springer、Elsevier、Wiley 的补充材料开关独立保存，默认均开启。Springer / Elsevier 间隔为 2–60 秒（默认 2），Wiley 为 10–60 秒（默认 10），独立保存。Wiley SI 依赖 Crossref 实际登记的线索，不保证所有论文都有可下载记录。
 5. 在论文列表查看每篇的状态，选中记录查看完整错误原因，双击已下载的记录可打开 PDF；“打开文章页面”可用于核对网页上的 Supporting Information。
 6. 完成后点击“打开结果清单”查看 CSV。每篇论文目录还有 `manifest.json`，记录正文与每个补充文件的结果。取消后重新导入同一文件、选择同一目录，可跳过通过校验的已有文件。
 
-Springer 下载器通过出版社文章页面发现下载地址。`10.1038/` DOI 定位到 Nature 文章页，其余 DOI 定位到 Springer 文章页，从页面元数据和链接发现正文及补充材料。Springer 下载无需 API Key；项目不调用 Unpaywall。
+Springer 下载器通过出版社文章页面发现下载地址。`10.1038/` DOI 定位到 Nature 文章页，其余 DOI 定位到 Springer 文章页，从页面元数据和链接发现正文及补充材料。Springer 正文下载无需 API Key，新增关键词检索需要 Meta API Key；项目不调用 Unpaywall。
 
 文件能否下载取决于当前网络及实际内容权限。Springer 遇到 HTTP 401、403、429 或登录页会记录访问受限，不自动重试这些响应。Elsevier 的限流和配额处理见下文。软件不执行账号登录或验证码操作。
+
+## 关键词检索与批量下载
+
+先在主界面选择出版社及期刊，再点击“关键词检索”。输入检索词、可选起止年份、获取篇数上限（默认 100，范围 1–1000），点击“开始检索”。结果显示标题、期刊与 DOI / PII，可以多选、全选，再点击“导入选中”。回到主界面确认目录及补充材料选项，点击“开始下载”。检索和导入不会立即下载正文。关闭检索窗口或检索失败会保留原有文献列表；取消检索可查看已取得的部分记录。
+
+检索完成后，可在列表上方的“结果期刊”下拉框选择期刊。选项来自本次已获取的文献，并显示各期刊篇数；选择后立即筛选，无需再次联网。切换筛选会默认选中当前显示的记录，可继续手动调整，“全选”和“导入选中”仅作用于当前显示的文献。选择全部期刊可恢复完整列表。筛选只覆盖已获取结果，例如获取了 100 条时只筛选这 100 条；若要针对某一期刊继续检索，请在主界面选择该期刊后重新检索。
+
+| 出版社 | 检索来源 | 所需凭据与范围 |
+| --- | --- | --- |
+| Springer Nature | Springer Meta API | `SpringerMetaKey`；检索元数据，与正文访问权限分开 |
+| Elsevier | ScienceDirect Search API v2 | `ElsevierKey`；需要 Search API 权限，可复用具备权限的原 Key |
+| Wiley | Wiley Online Library SRU | 无需 Token；正文仍由 `WileyKey` 调用 TDM API |
+
+软件通过 `os.environ.get("SpringerMetaKey", "")` 读取 Springer 检索凭据。访问设置中的 Springer Meta Key、Wiley Token 修改仅本次会话有效，不写入设置文件或 EXE。三个出版社的凭据分别读取和发送。
+
+Springer 使用一般文本检索与 `type:Journal`、日期条件。基础 Meta Key 不支持 `journal:` 专用筛选，因此选择期刊时先获取关键词结果，再按完整期刊名精确筛选；界面会说明接口总命中数是筛选前的关键词命中数。每次最多扫描 100 页，Springer 每页 20 条；宽泛关键词可能在扫描上限内找不到所需期刊的全部论文，可缩小年份和关键词后再检索。该方式不保证覆盖所有命中文献，也不调用 Premium 字段。
+
+Elsevier 使用原生 PUT 搜索接口，发送检索词、期刊、日期及分页条件；返回后再次核验期刊和年份。Wiley 使用官方 SRU 的 `cql.anywhere`、期刊与日期条件及 PAM 元数据，每页不超过 20 条。各出版社的关键词语法与检索范围不同，结果数量不宜直接对比。Wiley SRU 若返回访问限制、验证页或网络错误，会提示原因，可继续使用官网导出的 DOI / RIS；不会静默改用检索范围不同的 Crossref 结果。
+
+检索结果按 DOI / PII 去重，缺少可用标识的记录不进入下载队列。达到结果或分页上限、接口提前中断时，会明确提示结果可能不完整。检索请求、重试与跳转均遵守当前设置的间隔（Springer / Elsevier 至少 2 秒；界面中的 Wiley 至少 10 秒），429 按服务端要求有限等待。元数据检索调用也消耗该接口的配额；篇数上限是软件单次任务设置，不是出版社允许下载的每日额度。检索成功不代表有正文或 SI 的访问权限。
+
+命令行默认只搜索并导出 CSV，导出路径必须是新文件：
+
+```powershell
+conda run --no-capture-output -n PaperCollections python keyword_batch_download.py --publisher springer --keywords "photocatalysis" --year-from 2024 --year-to 2025 --max-results 100 --results "private/search_results.csv"
+```
+
+使用 `--publisher elsevier` 或 `--publisher wiley` 可切换出版社，`--journal "完整期刊名"` 筛选期刊。显式添加 `--download --output "downloads/search"` 才下载全部返回记录；支持 `--no-supplements`、`--interval`，Springer 还支持 `--cookie-file`。按 Ctrl+C 取消检索时会导出已获得的记录，不继续下载。
+
+官方参考：[Springer Meta API](https://datasolutions.springernature.com/products/meta-data/)、[Springer 查询字段](https://dev.springernature.com/docs/supported-query-params/)、[ScienceDirect 搜索接口](https://dev.elsevier.com/tecdoc_sdsearch_migration.html)、[Wiley SRU 说明](https://onlinelibrary.wiley.com/library-info/resources/discovery)。
 
 ## 版本更新
 
@@ -127,7 +157,7 @@ conda run --no-capture-output -n PaperCollections python -m unittest discover -s
 conda run --no-capture-output -n PaperCollections python build.py
 ```
 
-旧 EXE 正在运行时，可构建到版本目录：`conda run --no-capture-output -n PaperCollections python build.py --dist-dir dist/v1.8.0`。
+旧 EXE 正在运行时，可构建到版本目录：`conda run --no-capture-output -n PaperCollections python build.py --dist-dir dist/v1.9.1`。
 
 或者双击 `build.bat`。构建脚本检查当前 Conda 环境名称，安装所需依赖，运行测试，再生成单文件、无控制台窗口的 EXE，并执行离线启动自检。
 
@@ -137,7 +167,7 @@ conda run --no-capture-output -n PaperCollections python build.py
 
 离线测试使用模拟出版社网页和文件数据，覆盖期刊筛选、正文与补充文件保存、Cookie 作用域、逐跳检查、限速、重试、取消及 UI 状态流转。实际下载成功率取决于网站返回内容和访问权限。
 
-1.8.0 已通过 246 项自动化测试及 EXE 离线自检。更新检查测试覆盖版本数字排序、正式发布与页面地址校验、网络失败、响应大小限制、凭据隔离、后台线程、任务期间延后提示和关闭窗口后的回调处理；测试与 EXE 自检不访问更新网络接口。
+关键词检索测试覆盖三家接口分页、去重、精确期刊与年份筛选、凭据隔离、限速与限流、取消后保留部分结果、检索窗口导入及命令行下载选择。更新检查测试覆盖版本数字排序、正式发布与页面地址校验、网络失败、响应大小限制、凭据隔离、后台线程、任务期间延后提示和关闭窗口后的回调处理；测试与 EXE 自检不访问更新网络接口。
 
 1.7.0 已通过 230 项自动化测试，覆盖 WileyKey / ElsevierKey 环境变量读取、出版社 API 下载、DOI / PII 核验、期刊筛选、权限拒绝、配额暂停、限速、重试、PDF 校验和复用、跳转时隔离凭据、加密保存、GUI 与命令行流程，以及原有 Springer 和导入功能。Wiley SI 测试另外覆盖 Crossref 组件与正反向关系、父 DOI 归属、普通图片及关联论文排除、真实附件地址格式、查询不完整提示、未登记与人工处理状态、文件校验、取消和复用。EXE 离线自检检查 Wiley 默认 10 秒及 Crossref SI 配置、新解析模块、Elsevier SI 默认配置、DPAPI 加密解密和引文解析，确认依赖随程序打包。
 
@@ -178,6 +208,7 @@ Springer 请求只访问 HTTPS 的 `nature.com`、`springer.com`、`springernatu
 app.py                       程序入口与 EXE 离线自检
 elsevier_batch_download.py    Elsevier 命令行批量下载入口
 wiley_batch_download.py       Wiley 正文与 Crossref SI 命令行入口
+keyword_batch_download.py     关键词检索、CSV 导出与可选批量下载入口
 paper_downloader/
   gui.py                     Tkinter 图形界面与后台任务协调
   catalog.py                 出版社与期刊目录读取
@@ -186,7 +217,8 @@ paper_downloader/
   elsevier.py                Elsevier 官方 API 元数据、正文 PDF 与 SI 下载
   wiley.py                   Wiley TDM 正文下载与 Crossref 期刊核验
   wiley_supplements.py        Crossref SI 发现、附件下载及校验
-  credentials.py             ElsevierKey / WileyKey 环境变量读取与 Elsevier 可选 DPAPI 存储
+  search.py                  Springer Meta / ScienceDirect / Wiley SRU 关键词检索
+  credentials.py             三家环境变量读取与 Elsevier 可选 DPAPI 存储
   settings.py                用户设置保存
   updates.py                 GitHub 正式版本检查与发布地址校验
   data/journals.json         内置期刊目录

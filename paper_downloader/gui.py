@@ -18,21 +18,24 @@ from tkinter import filedialog, messagebox, ttk
 from urllib.parse import quote, urlsplit
 
 from . import __version__
-from .catalog import Publisher, load_catalog
+from .catalog import Publisher, load_catalog, normalize_journal
 from .doi_parser import ArticleReference, ParseResult, parse_doi_file, parse_reference_text
-from .credentials import clear_elsevier_credentials, load_elsevier_credentials, load_wiley_credentials, save_elsevier_credentials
+from .credentials import clear_elsevier_credentials, load_elsevier_credentials, load_springer_meta_credentials, load_wiley_credentials, save_elsevier_credentials
 from .downloader import (
     MAX_REQUEST_INTERVAL, MIN_REQUEST_INTERVAL, BatchSummary, DownloadConfig,
     DownloadResult, parse_request_interval, run_batch, validate_config,
 )
 from .elsevier import ElsevierConfig, run_elsevier_batch, validate_elsevier_config
 from .settings import load_settings, save_settings
+from .search import SearchConfig, SearchResult, search_articles, validate_search_config
 from .updates import UpdateCheckError, UpdateResult, check_for_update
 from .wiley import MIN_WILEY_INTERVAL, WileyConfig, parse_wiley_interval, run_wiley_batch, validate_wiley_config
 
 
 ALL_JOURNALS = "全部期刊（该出版社）"
 PASTE_SOURCE_LABEL = "已粘贴 DOI / 文献链接"
+SEARCH_SOURCE_LABEL = "关键词检索结果"
+SEARCH_PUBLISHERS = {"springer", "elsevier", "wiley"}
 STATUS_LABELS = {
     "pending": "待处理", "success": "已下载", "exists": "已存在",
     "partial": "部分完成", "no_pdf": "未找到正文", "access_denied": "访问受限",
@@ -64,6 +67,10 @@ class DownloaderApp(tk.Tk):
         self._destroyed = False
         self._access_dialog: tk.Toplevel | None = None
         self._paste_dialog: tk.Toplevel | None = None
+        self._search_dialog: _KeywordSearchDialog | None = None
+        self._search_token: object | None = None
+        self._search_source_key: tuple[str, str] | None = None
+        self._search_defaults: dict[str, str] = {}
         self._busy = False
         self._closing = False
         self._generation = 0
@@ -91,6 +98,7 @@ class DownloaderApp(tk.Tk):
         self.insttoken_var = tk.StringVar(value=credentials.get("insttoken", ""))
         self.remember_credentials_var = tk.BooleanVar(value=bool(credentials.get("remembered", False)))
         self.wiley_api_key_var = tk.StringVar(value=load_wiley_credentials().get("api_key", ""))
+        self.springer_meta_key_var = tk.StringVar(value=load_springer_meta_credentials().get("api_key", ""))
         self._publishers = load_catalog()
         if not self._publishers:
             raise ValueError("期刊目录为空，请重新安装软件。")
@@ -290,10 +298,11 @@ class DownloaderApp(tk.Tk):
         self.file_entry.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(0, 8))
         self.file_button = ttk.Button(settings, text="选择文件", command=self._pick_file)
         self.file_button.grid(row=2, column=4, sticky="ew")
-        ttk.Label(settings, text="DOI 列名", style="Card.TLabel").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(settings, text="DOI 列名（可选）", style="Card.TLabel").grid(row=3, column=0, sticky="w", pady=(8, 0))
         self.column_entry = ttk.Entry(settings, textvariable=self.column_var)
         self.column_entry.grid(row=3, column=1, sticky="ew", padx=(0, 20), pady=(8, 0))
-        ttk.Label(settings, text="留空自动识别", style="Muted.TLabel").grid(row=3, column=2, sticky="w", pady=(8, 0))
+        self.search_button = ttk.Button(settings, text="关键词检索", command=self._show_search_dialog)
+        self.search_button.grid(row=3, column=2, sticky="w", pady=(8, 0))
         self.paste_button = ttk.Button(settings, text="粘贴 DOI / 链接", command=self._show_paste_dialog)
         self.paste_button.grid(row=3, column=3, sticky="e", padx=(0, 8), pady=(8, 0))
         self.parse_button = ttk.Button(settings, text="解析文件", command=self._parse_file)
@@ -387,7 +396,7 @@ class DownloaderApp(tk.Tk):
         log_scroll.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=log_scroll.set)
         ttk.Label(self._content, textvariable=self.status_var, padding=(20, 0, 20, 9), font=("Microsoft YaHei UI", 9)).grid(row=4, column=0, sticky="ew")
-        self._editable_widgets = [self.file_entry, self.column_entry, self.output_entry, self.file_button, self.output_button, self.access_button, self.supplements_check, self.interval_combo, self.parse_button, self.paste_button]
+        self._editable_widgets = [self.file_entry, self.column_entry, self.output_entry, self.file_button, self.output_button, self.access_button, self.supplements_check, self.interval_combo, self.parse_button, self.paste_button, self.search_button]
 
     def _selected_publisher(self) -> Publisher:
         return self._publishers_by_name[self.publisher_var.get()]
@@ -459,6 +468,7 @@ class DownloaderApp(tk.Tk):
         enabled = not self._busy and self._selected_publisher().enabled and bool(self._eligible_references())
         self.start_button.configure(state="normal" if enabled else "disabled")
         self.export_button.configure(state="normal" if not self._busy and self._parsed and self._parsed.records else "disabled")
+        self.search_button.configure(state="normal" if not self._busy and self._selected_publisher().id in SEARCH_PUBLISHERS else "disabled")
 
     def _import_only_reason(self, reference: ArticleReference) -> str:
         try:
@@ -516,12 +526,13 @@ class DownloaderApp(tk.Tk):
     def _invalidate_parse(self, *_args: object) -> None:
         if self._busy:
             return
-        if _args and _args[0] == str(self.column_var) and self._source_mode == "paste":
+        if _args and _args[0] == str(self.column_var) and self._source_mode in {"paste", "search"}:
             return
         self._generation += 1
         self._parsed = None
         self._parsed_key = None
         self._source_signature = None
+        self._search_source_key = None
         self._source_mode = "file"
         self._pasted_text = ""
         self.parse_button.configure(text="解析文件")
@@ -537,6 +548,90 @@ class DownloaderApp(tk.Tk):
         if path:
             self.file_var.set(path)
             self._parse_file()
+
+    def _show_search_dialog(self) -> None:
+        if self._busy or self._closing:
+            return
+        if self._search_dialog is not None and self._search_dialog.winfo_exists():
+            self._search_dialog.lift()
+            return
+        publisher = self._selected_publisher()
+        if publisher.id not in SEARCH_PUBLISHERS:
+            return
+        journal = self.journal_var.get().strip()
+        if journal == ALL_JOURNALS:
+            journal = ""
+        if journal and journal not in publisher.journals:
+            messagebox.showerror("请选择期刊", "请选择完整期刊名称，或选择“全部期刊（该出版社）”。", parent=self)
+            return
+        self._search_dialog = _KeywordSearchDialog(self, publisher, journal)
+
+    def _start_search(self, dialog: _KeywordSearchDialog, config: SearchConfig) -> None:
+        if self._busy or self._closing or dialog is not self._search_dialog:
+            return
+        token = object()
+        self._search_token = token
+        self._cancel.clear()
+        self._set_busy(True)
+        dialog.set_running(True)
+        self.status_var.set("正在检索文献，检索完成后可选择记录导入…")
+
+        def work() -> None:
+            result, error = None, ""
+            try:
+                result = search_articles(config, on_log=lambda line: self._events.put(("search_log", token, line)), cancel_event=self._cancel)
+            except Exception as exc:
+                error = str(exc)
+                for secret in (config.api_key, config.insttoken):
+                    if secret:
+                        error = error.replace(secret, "[已隐藏]").replace(quote(secret, safe=""), "[已隐藏]")
+            self._events.put(("searched", token, dialog, result, error))
+
+        self._worker = threading.Thread(target=work, name="article-search", daemon=True)
+        self._worker.start()
+
+    def _finish_search(self, token: object, dialog: _KeywordSearchDialog, result: SearchResult | None, error: str) -> None:
+        if token is not self._search_token:
+            return
+        self._search_token = None
+        self._set_busy(False)
+        if self._closing:
+            return
+        if dialog is not self._search_dialog or not dialog.winfo_exists():
+            self.status_var.set("已结束检索，原文献列表已保留。")
+            return
+        dialog.set_running(False)
+        if error:
+            error = self._redact_secrets(error)
+            self._log(f"检索失败：{error}")
+            self.status_var.set("检索失败，原文献列表已保留。")
+            dialog.status_var.set(error)
+            messagebox.showerror("检索失败", error, parent=dialog)
+        elif result is not None:
+            dialog.show_result(result)
+            self.status_var.set("检索已结束，请在检索窗口选择文献并导入。")
+
+    def _import_search_records(self, dialog: _KeywordSearchDialog, records: list[ArticleReference]) -> None:
+        if self._busy or self._closing or dialog is not self._search_dialog or not records:
+            return
+        self.file_var.set(SEARCH_SOURCE_LABEL)
+        self._source_mode = "search"
+        self._pasted_text = ""
+        self._source_signature = None
+        self._search_source_key = (SEARCH_SOURCE_LABEL, str(self._generation))
+        self._parsed_key = self._search_source_key
+        self._parsed = ParseResult(dois=[], records=list(records))
+        # Keep the publisher and journal used for this search attached to its import.
+        if self.publisher_var.get() != dialog.publisher.name:
+            self.publisher_var.set(dialog.publisher.name)
+            self._publisher_changed()
+        self.journal_var.set(dialog.journal or ALL_JOURNALS)
+        self._populate_table(self._parsed.records)
+        self._refresh_import_rows()
+        self._set_busy(False)
+        self.status_var.set(f"已导入 {len(records)} 条检索结果。确认保存目录后点击“开始下载”。")
+        self._log(f"关键词检索导入：{dialog.publisher.name}；{len(records)} 条文献。")
+        dialog.close()
 
     def _show_paste_dialog(self) -> None:
         if self._busy:
@@ -667,12 +762,21 @@ class DownloaderApp(tk.Tk):
         self._access_dialog = dialog
         dialog.title("API / Cookie 设置")
         dialog.transient(self)
-        dialog.resizable(True, False)
-        dialog.geometry(f"{min(760, max(600, self.winfo_screenwidth() - 100))}x570")
-        dialog.minsize(600, 570)
+        dialog.resizable(True, True)
+        dialog.geometry(f"{min(760, max(600, self.winfo_screenwidth() - 100))}x{min(660, max(480, self.winfo_screenheight() - 120))}")
+        dialog.minsize(600, 480)
         dialog.configure(background="#ffffff")
-        frame = ttk.Frame(dialog, style="Card.TFrame", padding=20)
-        frame.pack(fill="both", expand=True)
+        footer = ttk.Frame(dialog, style="Card.TFrame", padding=(20, 8, 20, 14))
+        footer.pack(side="bottom", fill="x")
+        canvas = tk.Canvas(dialog, background="#ffffff", highlightthickness=0)
+        scrollbar = ttk.Scrollbar(dialog, orient="vertical", command=canvas.yview)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        frame = ttk.Frame(canvas, style="Card.TFrame", padding=20)
+        item = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(item, width=event.width))
         frame.grid_columnconfigure(1, weight=1)
         ttk.Label(frame, text="Elsevier API Key", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 12))
         self.api_key_entry = ttk.Entry(frame, textvariable=self.api_key_var, show="*")
@@ -695,6 +799,10 @@ class DownloaderApp(tk.Tk):
         self.wiley_api_key_entry = ttk.Entry(frame, textvariable=self.wiley_api_key_var, show="*")
         self.wiley_api_key_entry.grid(row=9, column=1, columnspan=2, sticky="ew")
         ttk.Label(frame, text="自动读取 WileyKey；在此修改只对本次会话生效，不写入设置或本机凭据文件。", style="Muted.TLabel", wraplength=620).grid(row=10, column=0, columnspan=3, sticky="w", pady=(6, 12))
+        ttk.Label(frame, text="Springer Meta Key", style="Card.TLabel").grid(row=11, column=0, sticky="w", padx=(0, 12))
+        self.springer_meta_key_entry = ttk.Entry(frame, textvariable=self.springer_meta_key_var, show="*")
+        self.springer_meta_key_entry.grid(row=11, column=1, columnspan=2, sticky="ew")
+        ttk.Label(frame, text="关键词检索自动读取 SpringerMetaKey；在此修改只对本次会话生效。Meta Key 不提供全文访问权限。", style="Muted.TLabel", wraplength=620).grid(row=12, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         def close() -> None:
             dialog.grab_release()
@@ -706,7 +814,7 @@ class DownloaderApp(tk.Tk):
                 self._save_preferences()
                 close()
 
-        ttk.Button(frame, text="完成", style="Primary.TButton", command=save_and_close).grid(row=11, column=2, sticky="e")
+        ttk.Button(footer, text="完成", style="Primary.TButton", command=save_and_close).pack(side="right")
         dialog.protocol("WM_DELETE_WINDOW", close)
         dialog.grab_set()
 
@@ -730,10 +838,15 @@ class DownloaderApp(tk.Tk):
         raw_path = self.file_var.get().strip().strip('"')
         if self._source_mode == "paste":
             return raw_path == PASTE_SOURCE_LABEL and self._text_key(self._pasted_text) == self._parsed_key
+        if self._source_mode == "search":
+            return raw_path == SEARCH_SOURCE_LABEL and self._search_source_key is not None and self._parsed_key == self._search_source_key
         return (raw_path, self.column_var.get().strip()) == self._parsed_key and self._file_signature(Path(raw_path).expanduser()) == self._source_signature
 
     def _parse_file(self) -> None:
         if self._busy:
+            return
+        if self._source_mode == "search" and self.file_var.get() == SEARCH_SOURCE_LABEL:
+            self._show_search_dialog()
             return
         if self._source_mode == "paste" and self.file_var.get() == PASTE_SOURCE_LABEL:
             self._import_reference_text(self._pasted_text)
@@ -852,9 +965,9 @@ class DownloaderApp(tk.Tk):
             widget.configure(state="disabled" if value else "normal")
         self.publisher_combo.configure(state="disabled" if value else "readonly")
         self.journal_combo.configure(state="disabled" if value else "normal")
-        self.column_entry.configure(state="disabled" if value or self._source_mode == "paste" else "normal")
+        self.column_entry.configure(state="disabled" if value or self._source_mode in {"paste", "search"} else "normal")
         self.supplements_check.configure(state="normal" if not value and self._selected_publisher().id in {"springer", "elsevier", "wiley"} else "disabled")
-        self.parse_button.configure(text="重新解析" if self._source_mode == "paste" else "解析文件")
+        self.parse_button.configure(text={"paste": "重新解析", "search": "重新检索"}.get(self._source_mode, "解析文件"))
         self.cancel_button.configure(state="normal" if value and downloading else "disabled")
         self._update_start_state()
 
@@ -875,6 +988,11 @@ class DownloaderApp(tk.Tk):
                 kind = event[0]
                 if kind == "update_checked":
                     self._finish_update_check(event[1], event[2])
+                elif kind == "search_log":
+                    if event[1] is self._search_token:
+                        self._log(event[2])
+                elif kind == "searched":
+                    self._finish_search(*event[1:])
                 elif kind == "parsed":
                     _, generation, key, signature, result = event
                     self._set_busy(False)
@@ -1134,10 +1252,14 @@ class DownloaderApp(tk.Tk):
         if result and result.file_path:
             self._open_path(Path(result.file_path))
 
-    def _log(self, text: str) -> None:
-        for secret in (self.api_key_var.get().strip(), self.insttoken_var.get().strip(), self.wiley_api_key_var.get().strip()):
+    def _redact_secrets(self, text: str) -> str:
+        for secret in (self.api_key_var.get().strip(), self.insttoken_var.get().strip(), self.wiley_api_key_var.get().strip(), self.springer_meta_key_var.get().strip()):
             if secret:
-                text = text.replace(secret, "[已隐藏]")
+                text = text.replace(secret, "[已隐藏]").replace(quote(secret, safe=""), "[已隐藏]")
+        return text
+
+    def _log(self, text: str) -> None:
+        text = self._redact_secrets(text)
         self.log_text.configure(state="normal")
         self.log_text.insert("end", f"[{datetime.now():%H:%M:%S}] {text}\n")
         # Keep the UI responsive for long batches; the manifest is the durable record.
@@ -1220,6 +1342,7 @@ class DownloaderApp(tk.Tk):
             return
         self._closing = True
         self._destroyed = True
+        self._cancel.set()
         self._pending_update = None
         if self._startup_update_id is not None:
             try:
@@ -1234,6 +1357,239 @@ class DownloaderApp(tk.Tk):
                 pass
             self._poll_id = None
         super().destroy()
+
+
+class _KeywordSearchDialog(tk.Toplevel):
+    """Preview search results and explicitly import a selection for downloading."""
+
+    def __init__(self, app: DownloaderApp, publisher: Publisher, journal: str) -> None:
+        super().__init__(app)
+        self.app = app
+        self.publisher = publisher
+        self.journal = journal
+        self.running = False
+        self.records: dict[str, ArticleReference] = {}
+        self._all_records: list[ArticleReference] = []
+        self._journal_filter_options: dict[str, str | None] = {"全部期刊（0 篇）": None}
+        self.title("关键词检索")
+        self.transient(app)
+        self.geometry(f"{min(1000, max(760, self.winfo_screenwidth() - 100))}x{min(680, max(500, self.winfo_screenheight() - 130))}")
+        self.minsize(720, 480)
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.configure(background="#f3f6fb")
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+        form = ttk.Frame(self, padding=16)
+        form.grid(row=0, column=0, sticky="ew")
+        form.grid_columnconfigure(1, weight=1)
+        ttk.Label(form, text=f"{publisher.name} · {journal or ALL_JOURNALS}", wraplength=900).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 10))
+        defaults = app._search_defaults
+        self.keywords_var = tk.StringVar(value=defaults.get("keywords", ""))
+        self.year_from_var = tk.StringVar(value=defaults.get("year_from", ""))
+        self.year_to_var = tk.StringVar(value=defaults.get("year_to", ""))
+        self.max_results_var = tk.StringVar(value=defaults.get("max_results", "100"))
+        ttk.Label(form, text="关键词").grid(row=1, column=0, sticky="w", padx=(0, 10))
+        keyword_entry = ttk.Entry(form, textvariable=self.keywords_var)
+        keyword_entry.grid(row=1, column=1, columnspan=5, sticky="ew")
+        ttk.Label(form, text="发表年份").grid(row=2, column=0, sticky="w", padx=(0, 10), pady=(10, 0))
+        years = ttk.Frame(form)
+        years.grid(row=2, column=1, sticky="w", pady=(10, 0))
+        year_from_entry = ttk.Entry(years, textvariable=self.year_from_var, width=7)
+        year_from_entry.pack(side="left")
+        ttk.Label(years, text=" 至 ").pack(side="left")
+        year_to_entry = ttk.Entry(years, textvariable=self.year_to_var, width=7)
+        year_to_entry.pack(side="left")
+        ttk.Label(years, text="（可留空）").pack(side="left", padx=(4, 0))
+        ttk.Label(form, text="最多获取").grid(row=2, column=2, padx=(10, 6), pady=(10, 0))
+        max_entry = ttk.Entry(form, textvariable=self.max_results_var, width=6)
+        max_entry.grid(row=2, column=3, pady=(10, 0))
+        ttk.Label(form, text="篇（1–1000）").grid(row=2, column=4, sticky="w", padx=6, pady=(10, 0))
+        self.search_button = ttk.Button(form, text="开始检索", command=self.start, style="Primary.TButton")
+        self.search_button.grid(row=2, column=5, sticky="e", pady=(10, 0))
+        self._inputs = (keyword_entry, year_from_entry, year_to_entry, max_entry)
+        self.status_var = tk.StringVar(value="检索仅获取文献列表；导入选中记录后，回主界面点击“开始下载”。")
+        ttk.Label(self, textvariable=self.status_var, wraplength=900, padding=(16, 0, 16, 10)).grid(row=1, column=0, sticky="ew")
+        self.bind("<Configure>", lambda event: self._resize_hint(event))
+        results = ttk.Frame(self, padding=(16, 0))
+        results.grid(row=2, column=0, sticky="nsew")
+        results.grid_columnconfigure(0, weight=1)
+        results.grid_rowconfigure(1, weight=1)
+        filters = ttk.Frame(results, padding=(0, 0, 0, 8))
+        filters.grid(row=0, column=0, columnspan=2, sticky="ew")
+        filters.grid_columnconfigure(1, weight=1)
+        ttk.Label(filters, text="结果期刊").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.journal_filter_var = tk.StringVar(value="全部期刊（0 篇）")
+        self.journal_filter_combo = ttk.Combobox(filters, textvariable=self.journal_filter_var, values=tuple(self._journal_filter_options), state="disabled", width=28)
+        self.journal_filter_combo.grid(row=0, column=1, sticky="ew")
+        self.filter_count_var = tk.StringVar(value="显示 0 / 共 0 篇")
+        ttk.Label(filters, textvariable=self.filter_count_var).grid(row=0, column=2, sticky="e", padx=10)
+        ttk.Label(filters, text="仅筛选已获取结果").grid(row=0, column=3, sticky="e")
+        self.table = ttk.Treeview(results, columns=("doi", "journal", "title"), show="headings", selectmode="extended")
+        for column, label, width in (("doi", "DOI / PII", 230), ("journal", "期刊", 220), ("title", "论文标题", 450)):
+            self.table.heading(column, text=label)
+            self.table.column(column, width=width, minwidth=90)
+        self.table.grid(row=1, column=0, sticky="nsew")
+        yscroll = ttk.Scrollbar(results, orient="vertical", command=self.table.yview)
+        yscroll.grid(row=1, column=1, sticky="ns")
+        xscroll = ttk.Scrollbar(results, orient="horizontal", command=self.table.xview)
+        xscroll.grid(row=2, column=0, sticky="ew")
+        self.table.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.table.bind("<<TreeviewSelect>>", self._selection_changed)
+        actions = ttk.Frame(self, padding=16)
+        actions.grid(row=3, column=0, sticky="ew")
+        self.select_all_button = ttk.Button(actions, text="全选", command=lambda: self.table.selection_set(self.table.get_children()))
+        self.select_all_button.pack(side="left")
+        self.deselect_button = ttk.Button(actions, text="取消全选", command=lambda: self.table.selection_remove(self.table.selection()))
+        self.deselect_button.pack(side="left", padx=6)
+        self.selection_var = tk.StringVar(value="已选 0 篇")
+        ttk.Label(actions, textvariable=self.selection_var).pack(side="left", padx=6)
+        self.import_button = ttk.Button(actions, text="导入选中", command=self.import_selection, style="Primary.TButton", state="disabled")
+        self.import_button.pack(side="right")
+        self.cancel_button = ttk.Button(actions, text="取消检索", command=self.cancel, state="disabled")
+        self.cancel_button.pack(side="right", padx=6)
+        ttk.Button(actions, text="关闭", command=self.close).pack(side="right")
+        for variable in (self.keywords_var, self.year_from_var, self.year_to_var, self.max_results_var):
+            variable.trace_add("write", self._query_changed)
+        self.journal_filter_var.trace_add("write", self._apply_journal_filter)
+        self.grab_set()
+        keyword_entry.focus_set()
+
+    def _resize_hint(self, event: tk.Event) -> None:
+        if event.widget is self:
+            for child in self.winfo_children():
+                if isinstance(child, ttk.Label):
+                    child.configure(wraplength=max(300, event.width - 40))
+
+    def _query_changed(self, *_args: object) -> None:
+        if not self.running:
+            self._clear_results()
+            self.status_var.set("检索条件已更改，请点击“开始检索”。")
+
+    def _clear_results(self) -> None:
+        self._all_records.clear()
+        self._journal_filter_options = {"全部期刊（0 篇）": None}
+        self.journal_filter_combo.configure(values=tuple(self._journal_filter_options), state="disabled")
+        self.filter_count_var.set("显示 0 / 共 0 篇")
+        self._clear_visible_records()
+        self.journal_filter_var.set("全部期刊（0 篇）")
+
+    def _clear_visible_records(self) -> None:
+        children = self.table.get_children()
+        if children:
+            self.table.delete(*children)
+        self.records.clear()
+        self._selection_changed()
+
+    def _rebuild_journal_filters(self) -> None:
+        counts: Counter[str] = Counter()
+        names: dict[str, str] = {}
+        for record in self._all_records:
+            key = normalize_journal(record.journal)
+            counts[key] += 1
+            if key:
+                names.setdefault(key, " ".join(record.journal.split()))
+        all_label = f"全部期刊（{len(self._all_records)} 篇）"
+        options: dict[str, str | None] = {all_label: None}
+        for key in sorted(counts, key=lambda item: (not bool(item), names.get(item, "").casefold())):
+            name = names.get(key, "未提供期刊名")
+            label = f"{name}（{counts[key]} 篇）"
+            # Keep an actual journal named like a special group independently selectable.
+            while label in options:
+                label += " [期刊]"
+            options[label] = key
+        self._journal_filter_options = options
+        self.journal_filter_combo.configure(values=tuple(options), state="readonly" if self._all_records and not self.running else "disabled")
+        self.journal_filter_var.set(all_label)
+
+    def _apply_journal_filter(self, *_args: object) -> None:
+        if self.running:
+            return
+        self._clear_visible_records()
+        label = self.journal_filter_var.get()
+        if label in self._journal_filter_options:
+            key = self._journal_filter_options[label]
+            for record in self._all_records:
+                if key is not None and normalize_journal(record.journal) != key:
+                    continue
+                row = self.table.insert("", "end", values=(record.doi or record.pii, record.journal, record.title))
+                self.records[row] = record
+        self.table.selection_set(self.table.get_children())
+        self.filter_count_var.set(f"显示 {len(self.records)} / 共 {len(self._all_records)} 篇")
+        self._selection_changed()
+
+    def _selection_changed(self, _event: object = None) -> None:
+        count = len(self.table.selection())
+        self.selection_var.set(f"已选 {count} 篇")
+        self.import_button.configure(state="normal" if count and not self.running else "disabled")
+
+    def set_running(self, value: bool) -> None:
+        self.running = value
+        for widget in (*self._inputs, self.search_button, self.select_all_button, self.deselect_button):
+            widget.configure(state="disabled" if value else "normal")
+        self.journal_filter_combo.configure(state="readonly" if self._all_records and not value else "disabled")
+        self.cancel_button.configure(state="normal" if value else "disabled")
+        self._selection_changed()
+        if value:
+            self.status_var.set("正在检索；可以取消并保留已找到的记录。")
+
+    def start(self) -> None:
+        if self.running or self.app._busy or self.app._closing:
+            return
+        try:
+            year_from = int(self.year_from_var.get()) if self.year_from_var.get().strip() else None
+            year_to = int(self.year_to_var.get()) if self.year_to_var.get().strip() else None
+            maximum = int(self.max_results_var.get())
+        except ValueError:
+            messagebox.showerror("检索条件无效", "年份和获取篇数应为整数；年份可留空。", parent=self)
+            return
+        try:
+            interval = parse_wiley_interval(self.app.interval_var.get()) if self.publisher.id == "wiley" else parse_request_interval(self.app.interval_var.get())
+            key = self.app.springer_meta_key_var.get().strip() if self.publisher.id == "springer" else self.app.api_key_var.get().strip() if self.publisher.id == "elsevier" else ""
+            config = SearchConfig(publisher_id=self.publisher.id, keywords=self.keywords_var.get().strip(), journal=self.journal, year_from=year_from, year_to=year_to, max_results=maximum, interval=interval, api_key=key, insttoken=self.app.insttoken_var.get().strip() if self.publisher.id == "elsevier" else "")
+            validate_search_config(config)
+        except ValueError as exc:
+            messagebox.showerror("检索条件无效", self.app._redact_secrets(str(exc)), parent=self)
+            return
+        self.app._search_defaults = {"keywords": self.keywords_var.get(), "year_from": self.year_from_var.get(), "year_to": self.year_to_var.get(), "max_results": self.max_results_var.get()}
+        self._clear_results()
+        self.app._start_search(self, config)
+
+    def show_result(self, result: SearchResult) -> None:
+        self._clear_results()
+        self._all_records = list(result.records)
+        self._rebuild_journal_filters()
+        total = f"，来源报告共 {result.total} 条" if result.total is not None else ""
+        summary = f"{'检索已取消' if result.cancelled else '检索完成'}：获取 {len(result.records)} 条{total}。"
+        if result.source:
+            summary += f" 来源：{result.source}。"
+        if result.truncated:
+            summary += " 尚有结果未获取，可收窄关键词、期刊或年份范围。"
+        if result.warnings:
+            summary += " " + "；".join(result.warnings[:3])
+        if not result.records:
+            summary += " 原文献列表已保留。"
+        self.status_var.set(self.app._redact_secrets(summary))
+        self._selection_changed()
+        for warning in result.warnings:
+            self.app._log(warning)
+
+    def import_selection(self) -> None:
+        if not self.running:
+            selected = set(self.table.selection())
+            self.app._import_search_records(self, [record for row, record in self.records.items() if row in selected])
+
+    def cancel(self) -> None:
+        if self.running:
+            self.app._cancel.set()
+            self.cancel_button.configure(state="disabled")
+            self.status_var.set("正在取消，等待当前请求结束；已获取记录可继续导入。")
+
+    def close(self) -> None:
+        self.cancel()
+        if self.app._search_dialog is self:
+            self.app._search_dialog = None
+        self.grab_release()
+        self.destroy()
 
 
 def main() -> None:
