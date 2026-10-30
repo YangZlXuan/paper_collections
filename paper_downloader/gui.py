@@ -17,6 +17,7 @@ import webbrowser
 from tkinter import filedialog, messagebox, ttk
 from urllib.parse import quote, urlsplit
 
+from . import __version__
 from .catalog import Publisher, load_catalog
 from .doi_parser import ArticleReference, ParseResult, parse_doi_file, parse_reference_text
 from .credentials import clear_elsevier_credentials, load_elsevier_credentials, load_wiley_credentials, save_elsevier_credentials
@@ -26,6 +27,7 @@ from .downloader import (
 )
 from .elsevier import ElsevierConfig, run_elsevier_batch, validate_elsevier_config
 from .settings import load_settings, save_settings
+from .updates import UpdateCheckError, UpdateResult, check_for_update
 from .wiley import MIN_WILEY_INTERVAL, WileyConfig, parse_wiley_interval, run_wiley_batch, validate_wiley_config
 
 
@@ -39,11 +41,11 @@ STATUS_LABELS = {
 
 
 class DownloaderApp(tk.Tk):
-    """Offline startup with explicit DOI parsing and cancellable download workers."""
+    """Responsive UI with separate download and update-check workers."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, check_updates: bool = True) -> None:
         super().__init__()
-        self.title("论文批量下载助手")
+        self.title(f"论文批量下载助手 {__version__}")
         window_width = min(1120, max(760, self.winfo_screenwidth() - 80))
         window_height = min(850, max(620, self.winfo_screenheight() - 100))
         self.geometry(f"{window_width}x{window_height}")
@@ -54,6 +56,12 @@ class DownloaderApp(tk.Tk):
         self._cancel = threading.Event()
         self._worker: threading.Thread | None = None
         self._poll_id: str | None = None
+        self._startup_update_id: str | None = None
+        self._checking_updates = False
+        self._update_manual = False
+        self._pending_update: UpdateResult | None = None
+        self._update_worker: threading.Thread | None = None
+        self._destroyed = False
         self._access_dialog: tk.Toplevel | None = None
         self._paste_dialog: tk.Toplevel | None = None
         self._busy = False
@@ -120,6 +128,7 @@ class DownloaderApp(tk.Tk):
         self.progress_var = tk.DoubleVar(value=0)
         self.progress_text_var = tk.StringVar(value="尚未开始")
         self.status_var = tk.StringVar(value="就绪")
+        self.update_status_var = tk.StringVar(value=f"当前版本 {__version__}")
         self.counts_var = tk.StringVar(value="已下载 0    已存在 0    部分完成 0    无正文 0    访问受限 0    筛除 0    失败 0")
         self.detail_var = tk.StringVar(value="选择记录可查看 DOI、PII、链接和下载结果。")
         self._configure_styles()
@@ -133,6 +142,80 @@ class DownloaderApp(tk.Tk):
         self.file_var.trace_add("write", self._invalidate_parse)
         self.column_var.trace_add("write", self._invalidate_parse)
         self._poll_id = self.after(80, self._drain_events)
+        if check_updates:
+            self._startup_update_id = self.after(1200, self._auto_check_updates)
+
+    def _auto_check_updates(self) -> None:
+        self._startup_update_id = None
+        self._check_updates(manual=False)
+
+    def _check_updates(self, *, manual: bool = True) -> None:
+        if self._closing or self._destroyed:
+            return
+        # A manual check also satisfies this launch's scheduled automatic check.
+        if self._startup_update_id is not None:
+            self.after_cancel(self._startup_update_id)
+            self._startup_update_id = None
+        self._update_manual = self._update_manual or manual
+        if manual:
+            self._pending_update = None
+        if self._checking_updates:
+            return
+        self._checking_updates = True
+        self.update_button.configure(state="disabled")
+        self.update_status_var.set("正在检查更新…")
+
+        def work() -> None:
+            try:
+                result = check_for_update(__version__)
+            except UpdateCheckError as exc:
+                self._events.put(("update_checked", None, str(exc)))
+            except Exception:
+                self._events.put(("update_checked", None, "检查更新失败，请稍后重试。"))
+            else:
+                self._events.put(("update_checked", result, ""))
+
+        self._update_worker = threading.Thread(target=work, name="update-checker", daemon=True)
+        self._update_worker.start()
+
+    def _finish_update_check(self, result: UpdateResult | None, error: str) -> None:
+        manual = self._update_manual
+        self._checking_updates = False
+        self._update_manual = False
+        if self._closing or self._destroyed:
+            return
+        self.update_button.configure(state="normal")
+        if error:
+            self.update_status_var.set("暂时无法检查更新")
+            self._log(f"检查更新：{error}")
+            if manual:
+                messagebox.showinfo("检查更新", error, parent=self)
+        elif result is not None and result.available:
+            self.update_status_var.set(f"发现新版 {result.version}")
+            if self._busy and not manual:
+                self._pending_update = result
+            else:
+                self._prompt_update(result)
+        elif result is not None:
+            self.update_status_var.set(f"当前 {__version__} · 无需更新")
+            if manual:
+                messagebox.showinfo("检查更新", f"当前版本：{__version__}\n最新正式版本：{result.version}\n无需更新。", parent=self)
+
+    def _prompt_update(self, result: UpdateResult) -> None:
+        if self._closing or self._destroyed:
+            return
+        accepted = messagebox.askyesno(
+            "发现新版本",
+            f"当前版本：{__version__}\n发现新版：{result.version}\n\n是否打开下载页面？\n下载后，请完成当前任务并关闭软件，再替换旧 EXE。",
+            parent=self,
+        )
+        if accepted and not self._closing and not self._destroyed:
+            try:
+                opened = webbrowser.open(result.url, new=2)
+            except (OSError, webbrowser.Error):
+                opened = False
+            if not opened:
+                messagebox.showinfo("打开下载页面", f"无法启动浏览器，请手动打开：\n{result.url}", parent=self)
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self)
@@ -179,6 +262,11 @@ class DownloaderApp(tk.Tk):
         self.bind("<MouseWheel>", self._scroll_page)
         header = tk.Frame(self._content, background="#173f70", padx=22, pady=10)
         header.grid(row=0, column=0, sticky="ew")
+        update_actions = tk.Frame(header, background="#173f70")
+        update_actions.pack(side="right", padx=(14, 0))
+        self.update_button = ttk.Button(update_actions, text="检查更新", command=self._check_updates)
+        self.update_button.pack(anchor="e")
+        tk.Label(update_actions, textvariable=self.update_status_var, foreground="#d6e4f7", background="#173f70", font=("Microsoft YaHei UI", 9)).pack(anchor="e", pady=(4, 0))
         tk.Label(header, text="论文批量下载助手", foreground="white", background="#173f70", font=("Microsoft YaHei UI", 19, "bold")).pack(anchor="w")
         tk.Label(header, text="支持 Springer / Nature、Elsevier 与 Wiley 论文批量下载", foreground="#d6e4f7", background="#173f70", font=("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(4, 0))
 
@@ -777,11 +865,17 @@ class DownloaderApp(tk.Tk):
         self._log("已请求取消任务。")
 
     def _drain_events(self) -> None:
+        if self._destroyed:
+            return
         try:
             for _ in range(150):
+                if self._destroyed:
+                    return
                 event = self._events.get_nowait()
                 kind = event[0]
-                if kind == "parsed":
+                if kind == "update_checked":
+                    self._finish_update_check(event[1], event[2])
+                elif kind == "parsed":
                     _, generation, key, signature, result = event
                     self._set_busy(False)
                     if generation == self._generation:
@@ -830,8 +924,15 @@ class DownloaderApp(tk.Tk):
                         messagebox.showerror("下载中断", event[1], parent=self)
         except queue.Empty:
             pass
+        if self._destroyed:
+            return
         if self._closing and not self._busy:
             self.destroy()
+            return
+        if not self._closing and not self._busy and self._pending_update is not None:
+            result, self._pending_update = self._pending_update, None
+            self._prompt_update(result)
+        if self._destroyed:
             return
         self._poll_id = self.after(80, self._drain_events)
 
@@ -1115,6 +1216,17 @@ class DownloaderApp(tk.Tk):
             self.destroy()
 
     def destroy(self) -> None:
+        if self._destroyed:
+            return
+        self._closing = True
+        self._destroyed = True
+        self._pending_update = None
+        if self._startup_update_id is not None:
+            try:
+                self.after_cancel(self._startup_update_id)
+            except tk.TclError:
+                pass
+            self._startup_update_id = None
         if self._poll_id is not None:
             try:
                 self.after_cancel(self._poll_id)

@@ -43,7 +43,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.addCleanup(self.credential_clear_patch.stop)
         self.addCleanup(self.wiley_credential_load_patch.stop)
         try:
-            self.app = gui.DownloaderApp()
+            self.app = gui.DownloaderApp(check_updates=False)
         except tk.TclError as exc:
             self.skipTest(f"Tk display unavailable: {exc}")
         self.app.withdraw()
@@ -164,7 +164,7 @@ class GuiWorkflowTests(unittest.TestCase):
     def test_saved_interval_is_restored_or_defaults_when_invalid(self):
         for stored, expected in (("3.5", "3.5"), ("60", "60"), ("1.5", "2"), ("nan", "2"), ("bad", "2")):
             with self.subTest(stored=stored), patch.object(gui, "load_settings", return_value={"request_interval": stored}):
-                second_app = gui.DownloaderApp()
+                second_app = gui.DownloaderApp(check_updates=False)
                 try:
                     second_app.withdraw()
                     self.assertEqual(second_app.interval_var.get(), expected)
@@ -295,7 +295,7 @@ class GuiWorkflowTests(unittest.TestCase):
     def test_empty_saved_cookie_path_displays_environment_default(self):
         cookie_path = str(self.folder / "environment.cookies")
         with patch.dict(os.environ, {"SN_COOKIE_FILE": cookie_path}), patch.object(gui, "load_settings", return_value={"cookie_file": "", "include_supplements": "false"}):
-            second_app = gui.DownloaderApp()
+            second_app = gui.DownloaderApp(check_updates=False)
             try:
                 second_app.withdraw()
                 self.assertEqual(second_app.cookie_var.get(), cookie_path)
@@ -558,7 +558,7 @@ class GuiWorkflowTests(unittest.TestCase):
 
     def test_encrypted_credential_load_populates_session_and_remember_flag(self):
         with patch.object(gui, "load_elsevier_credentials", return_value={"api_key": "a" * 32, "insttoken": "loaded-insttoken", "remembered": True}):
-            second_app = gui.DownloaderApp()
+            second_app = gui.DownloaderApp(check_updates=False)
             try:
                 second_app.withdraw()
                 self.assertEqual(second_app.api_key_var.get(), "a" * 32)
@@ -575,7 +575,7 @@ class GuiWorkflowTests(unittest.TestCase):
         ]
         for preferences, expected_elsevier, expected_springer in cases:
             with self.subTest(preferences=preferences), patch.object(gui, "load_settings", return_value=preferences):
-                second_app = gui.DownloaderApp()
+                second_app = gui.DownloaderApp(check_updates=False)
                 try:
                     second_app.withdraw()
                     self.assertEqual(second_app.supplements_var.get(), expected_elsevier)
@@ -672,7 +672,7 @@ class GuiWorkflowTests(unittest.TestCase):
     def test_wiley_saved_interval_loads_separately_and_rejects_old_short_value(self):
         for value, expected in (("15.5", "15.5"), ("2", "10"), ("nan", "10")):
             with self.subTest(value=value), patch.object(gui, "load_settings", return_value={"publisher_id": "wiley", "request_interval": "3", "wiley_request_interval": value}):
-                second_app = gui.DownloaderApp()
+                second_app = gui.DownloaderApp(check_updates=False)
                 try:
                     second_app.withdraw()
                     self.assertEqual(second_app.interval_var.get(), expected)
@@ -742,7 +742,7 @@ class GuiWorkflowTests(unittest.TestCase):
 
     def test_wiley_token_is_loaded_masked_and_never_saved(self):
         with patch.object(gui, "load_wiley_credentials", return_value={"api_key": "mock-wiley-token"}):
-            second_app = gui.DownloaderApp()
+            second_app = gui.DownloaderApp(check_updates=False)
             try:
                 second_app.withdraw()
                 self.assertEqual(second_app.wiley_api_key_var.get(), "mock-wiley-token")
@@ -771,7 +771,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertEqual(preferences["elsevier_include_supplements"], "true")
         self.assertEqual(preferences["wiley_include_supplements"], "false")
         with patch.object(gui, "load_settings", return_value=preferences):
-            second_app = gui.DownloaderApp()
+            second_app = gui.DownloaderApp(check_updates=False)
             try:
                 second_app.withdraw()
                 self.assertFalse(second_app.supplements_var.get())
@@ -831,6 +831,131 @@ class GuiWorkflowTests(unittest.TestCase):
         with patch.object(self.app, "_open_path") as open_path:
             self.app._open_selected_record()
             open_path.assert_called_once_with(record_path)
+
+
+    def test_update_check_runs_in_background_and_dialog_on_main_thread(self):
+        started, release_worker = threading.Event(), threading.Event()
+        self.addCleanup(release_worker.set)
+        worker_threads, dialog_threads = [], []
+        result = gui.UpdateResult("1.9.0", "https://github.com/YangZlXuan/paper_collections/releases/tag/v1.9.0", True)
+
+        def check(current):
+            worker_threads.append(threading.get_ident())
+            started.set()
+            release_worker.wait(3)
+            return result
+
+        def confirm(*args, **kwargs):
+            dialog_threads.append(threading.get_ident())
+            return True
+
+        with patch.object(gui, "check_for_update", side_effect=check) as checked, \
+                patch.object(gui.messagebox, "askyesno", side_effect=confirm), \
+                patch.object(gui.webbrowser, "open", return_value=True) as browser:
+            self.app.update_button.invoke()
+            self.assertTrue(started.wait(1))
+            self.assertTrue(self.app._checking_updates)
+            self.assertFalse(self.app._busy)
+            self.assertEqual(str(self.app.update_button.cget("state")), "disabled")
+            heartbeat = []
+            self.app.after(0, lambda: heartbeat.append(True))
+            self.app.update()
+            self.assertTrue(heartbeat)
+            self.app._check_updates()
+            checked.assert_called_once_with(gui.__version__)
+            release_worker.set()
+            self.wait_for(lambda: not self.app._checking_updates)
+            browser.assert_called_once_with(result.url, new=2)
+        self.assertNotEqual(worker_threads, [threading.get_ident()])
+        self.assertEqual(dialog_threads, [threading.get_ident()])
+        self.assertEqual(str(self.app.update_button.cget("state")), "normal")
+
+    def test_automatic_update_prompt_waits_for_active_task_and_can_be_declined(self):
+        result = gui.UpdateResult("1.9.0", "https://github.com/YangZlXuan/paper_collections/releases/tag/v1.9.0", True)
+        with patch.object(gui, "check_for_update", return_value=result), \
+                patch.object(gui.messagebox, "askyesno", return_value=False) as prompt, \
+                patch.object(gui.webbrowser, "open") as browser:
+            self.app._busy = True
+            self.app._check_updates(manual=False)
+            self.wait_for(lambda: not self.app._checking_updates)
+            prompt.assert_not_called()
+            self.assertEqual(self.app._pending_update, result)
+            self.app._busy = False
+            self.wait_for(lambda: prompt.called)
+            prompt.assert_called_once()
+            browser.assert_not_called()
+            self.assertIsNone(self.app._pending_update)
+
+    def test_failed_automatic_check_is_quiet_and_manual_check_explains_failure(self):
+        with patch.object(gui, "check_for_update", side_effect=gui.UpdateCheckError("暂时无法连接")), \
+                patch.object(gui.messagebox, "showinfo") as info:
+            self.app._busy = True
+            self.app._check_updates(manual=False)
+            self.wait_for(lambda: not self.app._checking_updates)
+            info.assert_not_called()
+            self.assertTrue(self.app._busy)
+            self.assertEqual(self.app.status_var.get(), "就绪")
+            self.assertFalse(self.app._cancel.is_set())
+            self.app._check_updates()
+            self.wait_for(lambda: not self.app._checking_updates)
+            self.assertIn("暂时无法连接", info.call_args.args[1])
+            self.assertNotIn("无需更新", self.app.update_status_var.get())
+            self.app._busy = False
+
+    def test_manual_check_without_new_release_shows_versions(self):
+        result = gui.UpdateResult(gui.__version__, "https://github.com/YangZlXuan/paper_collections/releases", False)
+        with patch.object(gui, "check_for_update", return_value=result), \
+                patch.object(gui.messagebox, "showinfo") as info, \
+                patch.object(gui.messagebox, "askyesno") as prompt:
+            self.app._check_updates()
+            self.wait_for(lambda: not self.app._checking_updates)
+            self.assertIn("无需更新", info.call_args.args[1])
+            self.assertIn(gui.__version__, info.call_args.args[1])
+            prompt.assert_not_called()
+
+    def test_browser_failure_shows_valid_download_address(self):
+        result = gui.UpdateResult("1.9.0", "https://github.com/YangZlXuan/paper_collections/releases/tag/v1.9.0", True)
+        with patch.object(gui.messagebox, "askyesno", return_value=True), \
+                patch.object(gui.webbrowser, "open", return_value=False), \
+                patch.object(gui.messagebox, "showinfo") as info:
+            self.app._prompt_update(result)
+            self.assertIn(result.url, info.call_args.args[1])
+
+    def test_default_startup_schedules_one_automatic_check(self):
+        result = gui.UpdateResult(gui.__version__, "https://github.com/YangZlXuan/paper_collections/releases", False)
+        with patch.object(gui, "check_for_update", return_value=result) as checked, \
+                patch.object(gui.messagebox, "showinfo") as info:
+            second = gui.DownloaderApp()
+            second.withdraw()
+            try:
+                self.assertIsNotNone(second._startup_update_id)
+                self.wait_for(lambda: checked.called and not second._checking_updates)
+                checked.assert_called_once_with(gui.__version__)
+                self.assertIsNone(second._startup_update_id)
+                info.assert_not_called()
+            finally:
+                second.destroy()
+
+    def test_close_during_update_does_not_wait_or_show_late_dialog(self):
+        started, finish = threading.Event(), threading.Event()
+        self.addCleanup(finish.set)
+
+        def check(current):
+            started.set()
+            finish.wait(3)
+            return gui.UpdateResult("1.9.0", "https://github.com/YangZlXuan/paper_collections/releases/tag/v1.9.0", True)
+
+        with patch.object(gui, "check_for_update", side_effect=check), \
+                patch.object(gui.messagebox, "askyesno") as prompt:
+            self.app._check_updates()
+            self.assertTrue(started.wait(1))
+            self.app._on_close()
+            self.assertTrue(self.app._destroyed)
+            self.assertIsNone(self.app._poll_id)
+            finish.set()
+            self.app._update_worker.join(2)
+            self.app._drain_events()
+            prompt.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -26,8 +26,11 @@ def self_test(destination: Path) -> None:
     from paper_downloader.wiley import WileyConfig, validate_wiley_config, MIN_WILEY_INTERVAL
     from paper_downloader.wiley_supplements import parse_components
     from paper_downloader.credentials import _crypt
+    from paper_downloader.updates import LATEST_RELEASE_API, parse_version
     from paper_downloader.gui import DownloaderApp
 
+    parse_version(__version__)
+    assert parse_version("v1.10.0") > parse_version("v1.9.0")
     catalog = load_catalog()
     assert catalog and any(p.id == "springer" and p.enabled for p in catalog)
     assert any(p.id == "elsevier" and p.enabled for p in catalog)
@@ -65,7 +68,7 @@ def self_test(destination: Path) -> None:
     config = DownloadConfig(email="", output_dir=destination.parent)
     assert config.include_supplements and config.interval == MIN_REQUEST_INTERVAL == 2.0
     assert article_url("10.1038/s41586-021-03819-2") == "https://www.nature.com/articles/s41586-021-03819-2"
-    app = DownloaderApp()
+    app = DownloaderApp(check_updates=False)
     app.withdraw()
     app.update_idletasks()
     app.update()
@@ -98,6 +101,8 @@ def self_test(destination: Path) -> None:
         "wiley_credential_environment": "WileyKey",
         "elsevier_supplements_supported": True,
         "elsevier_supplements_default": elsevier_config.include_supplements,
+        "update_check_api": LATEST_RELEASE_API,
+        "automatic_update_check_in_self_test": False,
         "credential_protection": "windows-dpapi-current-user",
         "supplements_default": config.include_supplements,
         "default_request_interval_seconds": config.interval,

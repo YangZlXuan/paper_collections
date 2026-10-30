@@ -1,6 +1,6 @@
 # 论文批量下载助手
 
-Python 桌面软件，导入 DOI 文件、RIS / BibTeX 引文和 ScienceDirect 文章链接，解析、去重并批量下载。当前版本为 1.7.0：Springer / Nature 支持正文 PDF 和补充材料；Elsevier / ScienceDirect 通过官方 API 下载正文 PDF 和补充材料（SI）；Wiley 正文通过官方 TDM API 下载，SI 通过 Crossref 元数据辅助发现并尝试获取。其余出版社可导入、预览和导出清单，下载入口暂未启用。
+Python 桌面软件，导入 DOI 文件、RIS / BibTeX 引文和 ScienceDirect 文章链接，解析、去重并批量下载。当前版本为 1.8.0：支持启动后台检查更新及手动检查；Springer / Nature 支持正文 PDF 和补充材料；Elsevier / ScienceDirect 通过官方 API 下载正文 PDF 和补充材料（SI）；Wiley 正文通过官方 TDM API 下载，SI 通过 Crossref 元数据辅助发现并尝试获取。其余出版社可导入、预览和导出清单，下载入口暂未启用。
 
 ## 直接使用 EXE
 
@@ -16,6 +16,16 @@ Python 桌面软件，导入 DOI 文件、RIS / BibTeX 引文和 ScienceDirect �
 Springer 下载器通过出版社文章页面发现下载地址。`10.1038/` DOI 定位到 Nature 文章页，其余 DOI 定位到 Springer 文章页，从页面元数据和链接发现正文及补充材料。Springer 下载无需 API Key；项目不调用 Unpaywall。
 
 文件能否下载取决于当前网络及实际内容权限。Springer 遇到 HTTP 401、403、429 或登录页会记录访问受限，不自动重试这些响应。Elsevier 的限流和配额处理见下文。软件不执行账号登录或验证码操作。
+
+## 版本更新
+
+从 1.8.0 起，软件启动约一秒后会在后台检查一次正式版本，也可点击右上角“检查更新”。发布源为 [GitHub Releases](https://github.com/YangZlXuan/paper_collections/releases)。发现比当前版本新的正式发布时，提示是否打开下载页面；自动检查期间若正在解析或下载论文，提示会延后至任务结束。软件不会自动下载安装或替换文件。
+
+选择打开页面后，下载 Release 附件中的 `PaperDownloader.exe`，完成当前任务并关闭旧版，再替换旧 EXE。设置保存在用户目录，正常替换 EXE 可继续使用原有设置与下载结果。1.7.0 及更早版本需要先手动安装一次 1.8.0 或更高版本，之后才能收到提示。
+
+检查使用公开 GitHub API，只发送软件版本及必要的请求头，不携带出版社 API Key、Cookie、邮箱或文献清单。网络失败、GitHub 限流或尚无公开 Release 时，自动检查不弹出错误窗口，也不影响论文下载；手动检查会说明原因。程序保持系统代理与证书配置支持，无需配置 GitHub Token。
+
+维护者发版时，同步更新 `paper_downloader/__init__.py`、`pyproject.toml` 和 `version_info.txt`，运行构建脚本，在上述仓库创建 `vX.Y.Z` 格式标签的正式 Release，标记为 Latest 并上传对应 EXE。仅推送源码或标签不会产生更新提示；草稿和预发布版本不作为更新目标。版本按数字比较，因此 1.10.0 会正确识别为高于 1.9.0。
 
 ## Elsevier 下载与权限
 
@@ -113,7 +123,7 @@ conda run --no-capture-output -n PaperCollections python -m unittest discover -s
 conda run --no-capture-output -n PaperCollections python build.py
 ```
 
-旧 EXE 正在运行时，可构建到版本目录：`conda run --no-capture-output -n PaperCollections python build.py --dist-dir dist/v1.7.0`。
+旧 EXE 正在运行时，可构建到版本目录：`conda run --no-capture-output -n PaperCollections python build.py --dist-dir dist/v1.8.0`。
 
 或者双击 `build.bat`。构建脚本检查当前 Conda 环境名称，安装所需依赖，运行测试，再生成单文件、无控制台窗口的 EXE，并执行离线启动自检。
 
@@ -122,6 +132,8 @@ conda run --no-capture-output -n PaperCollections python build.py
 - 独立离线自检：`dist\PaperDownloader.exe --self-test build\check.json`
 
 离线测试使用模拟出版社网页和文件数据，覆盖期刊筛选、正文与补充文件保存、Cookie 作用域、逐跳检查、限速、重试、取消及 UI 状态流转。实际下载成功率取决于网站返回内容和访问权限。
+
+1.8.0 已通过 246 项自动化测试及 EXE 离线自检。更新检查测试覆盖版本数字排序、正式发布与页面地址校验、网络失败、响应大小限制、凭据隔离、后台线程、任务期间延后提示和关闭窗口后的回调处理；测试与 EXE 自检不访问更新网络接口。
 
 1.7.0 已通过 230 项自动化测试，覆盖 WileyKey / ElsevierKey 环境变量读取、出版社 API 下载、DOI / PII 核验、期刊筛选、权限拒绝、配额暂停、限速、重试、PDF 校验和复用、跳转时隔离凭据、加密保存、GUI 与命令行流程，以及原有 Springer 和导入功能。Wiley SI 测试另外覆盖 Crossref 组件与正反向关系、父 DOI 归属、普通图片及关联论文排除、真实附件地址格式、查询不完整提示、未登记与人工处理状态、文件校验、取消和复用。EXE 离线自检检查 Wiley 默认 10 秒及 Crossref SI 配置、新解析模块、Elsevier SI 默认配置、DPAPI 加密解密和引文解析，确认依赖随程序打包。
 
@@ -172,6 +184,7 @@ paper_downloader/
   wiley_supplements.py        Crossref SI 发现、附件下载及校验
   credentials.py             ElsevierKey / WileyKey 环境变量读取与 Elsevier 可选 DPAPI 存储
   settings.py                用户设置保存
+  updates.py                 GitHub 正式版本检查与发布地址校验
   data/journals.json         内置期刊目录
 tests/                       离线自动化测试
 tools/extract_catalog.py     从原始分类表重新生成目录
