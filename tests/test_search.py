@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import io
 import json
+from email.message import Message
 import threading
+from types import SimpleNamespace
 import unittest
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
@@ -26,6 +28,15 @@ def response(body=b"", status=200, headers=None):
     result.headers.update(headers or {})
     result.raw = io.BytesIO(body)
     result.encoding = "utf-8"
+    return result
+
+
+def with_cookies(result, *values):
+    """Expose real Set-Cookie headers through requests' urllib3 compatibility hook."""
+    headers = Message()
+    for value in values:
+        headers.add_header("Set-Cookie", value)
+    result.raw._original_response = SimpleNamespace(msg=headers)
     return result
 
 
@@ -299,6 +310,94 @@ class SearchTests(unittest.TestCase):
         for private in (TOKEN, INSTTOKEN, "old-token", "old-key", "Basic old", "auth=private", "old-query"):
             self.assertNotIn(private, rendered)
         self.assertNotIn("Cookie", request.headers)
+
+    def test_wiley_cookie_handshake_survives_redirect_and_pagination(self):
+        self.config = search.SearchConfig("wiley", "water", interval=10, retries=0)
+        result, session = self.run_fake([
+            with_cookies(response(status=302, headers={"Location": search.WILEY_ENDPOINT + "?cookieSet=1"}),
+                         "SRUSESSION=synthetic-session; Path=/; Secure; HttpOnly"),
+            wiley(wrow(), total=2, next_position=2),
+            wiley(wrow("10.1002/article-b"), total=2),
+        ])
+        self.assertEqual([record.doi for record in result.records], ["10.1002/article-a", "10.1002/article-b"])
+        self.assertNotIn("Cookie", session.calls[0][0].headers)
+        for request, options in session.calls[1:]:
+            self.assertEqual(request.headers["Cookie"], "SRUSESSION=synthetic-session")
+            self.assertFalse(options["allow_redirects"])
+            self.assertEqual(urlsplit(request.url).path, "/action/sru")
+        self.assertEqual(session.send_times, [0, 10, 20])
+
+    def test_wiley_cookies_respect_domain_path_expiry_and_server_deletion(self):
+        self.config = search.SearchConfig("wiley", "water", retries=0)
+        result, session = self.run_fake([
+            with_cookies(response(status=302, headers={"Location": search.WILEY_ENDPOINT + "?cookieSet=1"}),
+                         "live=keep; Domain=.wiley.com; Path=/action; Secure",
+                         "foreign=reject; Domain=elsevier.com; Path=/",
+                         "otherpath=reject; Path=/doi",
+                         "expired=reject; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+                         "remove=old; Path=/"),
+            with_cookies(response(status=302, headers={"Location": search.WILEY_ENDPOINT + "?cookieSet=2"}),
+                         "remove=deleted; Path=/; Max-Age=0"),
+            wiley(wrow(), total=1),
+        ])
+        self.assertEqual(len(result.records), 1)
+        second = session.calls[1][0].headers.get("Cookie", "")
+        self.assertEqual(set(second.split("; ")), {"live=keep", "remove=old"})
+        self.assertEqual(session.calls[2][0].headers.get("Cookie"), "live=keep")
+
+    def test_wiley_cookie_session_does_not_allow_other_redirect_destinations(self):
+        self.config = search.SearchConfig("wiley", "water", retries=0)
+        targets = ["https://external.example/action/sru", "https://api.wiley.com/action/sru",
+                   "https://onlinelibrary.wiley.com/action/cookieAbsent",
+                   "https://onlinelibrary.wiley.com/action/oidcStart",
+                   "http://onlinelibrary.wiley.com/action/sru"]
+        for target in targets:
+            session = FakeSession([
+                with_cookies(response(status=302, headers={"Location": search.WILEY_ENDPOINT + "?cookieSet=1"}),
+                             "SRUSESSION=synthetic-session; Path=/; Secure"),
+                response(status=302, headers={"Location": target}),
+            ])
+            with self.subTest(target=target), self.assertRaises(search.SearchError):
+                self.run_fake(session=session)
+            self.assertEqual(len(session.calls), 2)
+            self.assertEqual(session.calls[1][0].headers.get("Cookie"), "SRUSESSION=synthetic-session")
+            self.assertTrue(all(urlsplit(request.url).path == "/action/sru" for request, _ in session.calls))
+
+    def test_wiley_new_search_discards_previous_session_and_external_cookies(self):
+        self.config = search.SearchConfig("wiley", "water", api_key=TOKEN, insttoken=INSTTOKEN, retries=0)
+        session = FakeSession([
+            with_cookies(response(status=302, headers={"Location": search.WILEY_ENDPOINT + "?cookieSet=1"}),
+                         "SRUSESSION=synthetic-session; Path=/; Secure"),
+            wiley(wrow(), total=1),
+            wiley(wrow(), total=1),
+        ])
+        session.headers.update({"Cookie": "manual=private", "Authorization": "Basic private",
+                                "Wiley-TDM-Client-Token": "old-token", "X-ELS-APIKey": "old-key"})
+        session.cookies.set("preloaded", "private", domain="onlinelibrary.wiley.com", path="/")
+        first, _ = self.run_fake(session=session)
+        second, _ = self.run_fake(session=session)
+        self.assertEqual(len(first.records), 1)
+        self.assertEqual(len(second.records), 1)
+        self.assertNotIn("Cookie", session.calls[0][0].headers)
+        self.assertEqual(session.calls[1][0].headers.get("Cookie"), "SRUSESSION=synthetic-session")
+        self.assertNotIn("Cookie", session.calls[2][0].headers)
+        for request, _ in session.calls:
+            rendered = request.url + str(dict(request.headers))
+            for secret in (TOKEN, INSTTOKEN, "manual=private", "preloaded=private", "Basic private", "old-token", "old-key"):
+                self.assertNotIn(secret, rendered)
+
+    def test_other_publishers_keep_search_cookie_isolation(self):
+        for publisher, endpoint, final, redirect_status in (
+            ("springer", search.SPRINGER_ENDPOINT, springer([srow()]), 302),
+            ("elsevier", search.ELSEVIER_ENDPOINT, elsevier([erow()]), 307),
+        ):
+            self.config = search.SearchConfig(publisher, "water", api_key=TOKEN, retries=0)
+            with self.subTest(publisher=publisher):
+                result, session = self.run_fake([
+                    with_cookies(response(status=redirect_status, headers={"Location": endpoint}),
+                                 "session=synthetic-publisher-session; Path=/; Secure"), final])
+                self.assertEqual(len(result.records), 1)
+                self.assertTrue(all("Cookie" not in request.headers for request, _ in session.calls))
 
     def test_redirects_never_forward_credentials_to_different_origin_or_path(self):
         locations = ["https://evil.example/search", "http://api.springernature.com/meta/v2/json",

@@ -134,6 +134,9 @@ class _Client:
         self.session, self.config, self.event = session, config, event
         self.last_request: float | None = None
         self.quota_exhausted = False
+        # Only cookies received during this SRU search may be sent back to Wiley.
+        # Do not reuse browser cookies, raw Cookie headers or another client's jar.
+        self._wiley_cookies = requests.cookies.RequestsCookieJar()
 
     def _allowed(self, url: str) -> bool:
         try:
@@ -158,13 +161,26 @@ class _Client:
                 value = max(float(self.config.interval), 2 ** attempt)
         return max(0.0, value) if math.isfinite(value) else _MAX_WAIT + 1
 
+    def _redirect_error(self, url: str) -> str:
+        if self.config.publisher_id == "wiley":
+            try:
+                destination = urlsplit(url)
+                if destination.hostname == "onlinelibrary.wiley.com":
+                    if destination.path == "/action/cookieAbsent":
+                        return "Wiley 检索会话的 Cookie 检查未通过。请稍后重试，或使用官网导出的 DOI / RIS 文件；此问题与 WileyKey 无关。"
+                    if destination.path == "/action/oidcStart":
+                        return "Wiley 检索被转到身份验证页面，已停止请求。请检查网络访问条件，或使用官网导出的 DOI / RIS 文件。"
+            except ValueError:
+                pass
+        return "检索接口跳转到非预期地址，已停止请求。"
+
     def read(self, url: str, *, payload: dict | None = None, xml: bool = False) -> bytes:
         if self.quota_exhausted:
             raise SearchError("检索接口配额已耗尽，请等待重置后再试。")
         method = "PUT" if payload is not None else "GET"
         for redirect in range(5):
             if not self._allowed(url):
-                raise SearchError("检索接口跳转到非预期地址，已停止请求。")
+                raise SearchError(self._redirect_error(url))
             for attempt in range(self.config.retries + 1):
                 _check_cancel(self.event)
                 if self.last_request is not None:
@@ -183,6 +199,10 @@ class _Client:
                 prepared.url = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
                 if not self._allowed(prepared.url):
                     raise SearchError("检索请求地址无效，已停止请求。")
+                if self.config.publisher_id == "wiley":
+                    # CookieJar applies domain, path, Secure and expiry rules;
+                    # the endpoint allowlist above still applies to every hop.
+                    prepared.prepare_cookies(self._wiley_cookies)
                 if self.config.publisher_id == "elsevier":
                     prepared.headers["X-ELS-APIKey"] = self.config.api_key.strip()
                     if self.config.insttoken.strip():
@@ -195,6 +215,8 @@ class _Client:
                         timeout=(min(15.0, self.config.timeout), self.config.timeout), **settings)
                     with response:
                         _check_cancel(self.event)
+                        if self.config.publisher_id == "wiley":
+                            requests.cookies.extract_cookies_to_jar(self._wiley_cookies, prepared, response.raw)
                         status = response.status_code
                         if status in _REDIRECTS:
                             location = response.headers.get("Location", "")

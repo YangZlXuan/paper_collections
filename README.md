@@ -1,6 +1,6 @@
 # 论文批量下载助手
 
-Python 桌面软件，导入 DOI 文件、RIS / BibTeX 引文和 ScienceDirect 文章链接，解析、去重并批量下载。当前版本为 1.9.1：支持官方接口关键词检索、结果预览、按期刊筛选与选择导入，保留启动后台检查更新及手动检查；Springer / Nature 支持正文 PDF 和补充材料；Elsevier / ScienceDirect 通过官方 API 下载正文 PDF 和补充材料（SI）；Wiley 正文通过官方 TDM API 下载，SI 通过 Crossref 元数据辅助发现并尝试获取。其余出版社可导入、预览和导出清单，下载入口暂未启用。
+Python 桌面软件，导入 DOI 文件、RIS / BibTeX 引文和 ScienceDirect 文章链接，解析、去重并批量下载。当前版本为 1.9.2：支持官方接口关键词检索、结果预览、按期刊筛选与选择导入，并修复 Wiley SRU 检索的会话 Cookie 处理，保留启动后台检查更新及手动检查；Springer / Nature 支持正文 PDF 和补充材料；Elsevier / ScienceDirect 通过官方 API 下载正文 PDF 和补充材料（SI）；Wiley 正文通过官方 TDM API 下载，SI 通过 Crossref 元数据辅助发现并尝试获取。其余出版社可导入、预览和导出清单，下载入口暂未启用。
 
 ## 直接使用 EXE
 
@@ -38,6 +38,8 @@ Springer 下载器通过出版社文章页面发现下载地址。`10.1038/` DOI
 Springer 使用一般文本检索与 `type:Journal`、日期条件。基础 Meta Key 不支持 `journal:` 专用筛选，因此选择期刊时先获取关键词结果，再按完整期刊名精确筛选；界面会说明接口总命中数是筛选前的关键词命中数。每次最多扫描 100 页，Springer 每页 20 条；宽泛关键词可能在扫描上限内找不到所需期刊的全部论文，可缩小年份和关键词后再检索。该方式不保证覆盖所有命中文献，也不调用 Premium 字段。
 
 Elsevier 使用原生 PUT 搜索接口，发送检索词、期刊、日期及分页条件；返回后再次核验期刊和年份。Wiley 使用官方 SRU 的 `cql.anywhere`、期刊与日期条件及 PAM 元数据，每页不超过 20 条。各出版社的关键词语法与检索范围不同，结果数量不宜直接对比。Wiley SRU 若返回访问限制、验证页或网络错误，会提示原因，可继续使用官网导出的 DOI / RIS；不会静默改用检索范围不同的 Crossref 结果。
+
+从 1.9.2 起，Wiley SRU 会保留本次检索中官方接口设置的会话 Cookie，用于正常的 `cookieSet` 跳转和后续分页。Cookie 仅保存在当前检索任务的内存中，不读取浏览器 Cookie、不写入文件，也不携带 Wiley TDM Token。每次请求仍限定为 HTTPS 的 `onlinelibrary.wiley.com/action/sru`，并遵守 Cookie 的域名、路径、Secure 与有效期限制。若仍跳转到 `cookieAbsent` 或身份验证页面，会显示对应原因并停止，不把该页面当作检索结果。
 
 检索结果按 DOI / PII 去重，缺少可用标识的记录不进入下载队列。达到结果或分页上限、接口提前中断时，会明确提示结果可能不完整。检索请求、重试与跳转均遵守当前设置的间隔（Springer / Elsevier 至少 2 秒；界面中的 Wiley 至少 10 秒），429 按服务端要求有限等待。元数据检索调用也消耗该接口的配额；篇数上限是软件单次任务设置，不是出版社允许下载的每日额度。检索成功不代表有正文或 SI 的访问权限。
 
@@ -157,7 +159,7 @@ conda run --no-capture-output -n PaperCollections python -m unittest discover -s
 conda run --no-capture-output -n PaperCollections python build.py
 ```
 
-旧 EXE 正在运行时，可构建到版本目录：`conda run --no-capture-output -n PaperCollections python build.py --dist-dir dist/v1.9.1`。
+旧 EXE 正在运行时，可构建到版本目录：`conda run --no-capture-output -n PaperCollections python build.py --dist-dir dist/v1.9.2`。
 
 或者双击 `build.bat`。构建脚本检查当前 Conda 环境名称，安装所需依赖，运行测试，再生成单文件、无控制台窗口的 EXE，并执行离线启动自检。
 
