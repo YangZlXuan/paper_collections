@@ -4,6 +4,10 @@ Python 桌面软件，导入 DOI 文件、RIS / BibTeX 引文和 ScienceDirect �
 
 ## 直接使用 EXE
 
+**[⬇ 下载 Windows EXE（最新版本）](https://github.com/YangZlXuan/paper_collections/releases/latest)** · [查看历史版本](https://github.com/YangZlXuan/paper_collections/releases)
+
+进入下载页面后，在 **Assets（附件）** 中选择 `PaperDownloader.exe`，无需下载源码压缩包。
+
 运行 `PaperDownloader.exe` 即可使用，无需安装 Python 或 Conda。更新时请先完成当前任务并关闭旧版，再启动新版。EXE 可单独复制到其他 Windows 64 位电脑运行。
 
 1. 选择 **Springer Nature**、**Elsevier** 或 **Wiley**，选择一本期刊或“全部期刊（该出版社）”。可在期刊框输入关键词后展开列表选择。
