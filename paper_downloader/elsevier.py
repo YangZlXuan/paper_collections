@@ -144,6 +144,8 @@ class _Client:
     def __init__(self, session: requests.Session, config: ElsevierConfig, event: threading.Event):
         validate_elsevier_config(config)
         self.session, self.config, self.event = session, config, event
+        # Main files, supplements and redirects must use the institution's network.
+        self.session.trust_env = False
         self.interval = parse_request_interval(config.interval)
         self.last_request: float | None = None
         self.quota_exhausted = False

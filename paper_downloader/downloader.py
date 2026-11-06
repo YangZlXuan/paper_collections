@@ -208,6 +208,8 @@ def _error(exc: Exception) -> str:
 class _Client:
     def __init__(self, session: requests.Session, config: DownloadConfig, event: threading.Event):
         self.session, self.config, self.event = session, config, event
+        # Use the host network for institutional access; ignore system/env proxies.
+        self.session.trust_env = False
         # Snapshot once: edits to the UI/config during a batch cannot change its
         # request rate or bypass validation through direct client construction.
         self.interval = parse_request_interval(config.interval)

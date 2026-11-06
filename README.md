@@ -20,6 +20,8 @@
 | Elsevier | 需要已开通 ScienceDirect Search 权限的 Elsevier API Key | 使用同一把 Key，但还需要正文 PDF 权限；下载补充材料另需附件访问权限。也支持 ScienceDirect 文章链接 |
 | Wiley | 不需要 Token | 需要 Wiley TDM Token；下载订阅文章时还需在有权限的机构网络下使用 |
 
+搜索、主文和附件下载及其重定向均忽略系统及环境 HTTP 代理（`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`，含小写形式），保留 TLS 证书验证。实际出口由当前网络决定，机构访问仍依赖出口 IP 和授权；程序不修改 VPN/TUN 配置。
+
 ### Springer Nature：申请关键词检索用的 Meta Key
 
 1. 打开 [Springer Nature 开发者门户](https://dev.springernature.com/)，注册或登录账号。

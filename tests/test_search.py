@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from email.message import Message
 import threading
 from types import SimpleNamespace
@@ -153,6 +154,20 @@ class SearchTests(unittest.TestCase):
         self.assertFalse(kwargs["allow_redirects"])
         self.assertFalse(any("key" in name.lower() for name in request.headers))
         self.assertTrue(any("本地精确" in warning for warning in result.warnings))
+
+    def test_batch_and_page_search_do_not_use_environment_proxies(self):
+        proxy_environment = {"HTTP_PROXY": "http://proxy.invalid:8080", "HTTPS_PROXY": "http://proxy.invalid:8080",
+                             "ALL_PROXY": "http://proxy.invalid:8080", "NO_PROXY": ""}
+        for paged in (False, True):
+            with self.subTest(paged=paged), patch.dict(os.environ, proxy_environment):
+                session = FakeSession([springer([srow()])])
+                with patch.object(search.requests, "Session", return_value=session):
+                    if paged:
+                        search.search_articles_page(self.config, page_size=1)
+                    else:
+                        search.search_articles(self.config)
+                self.assertFalse(session.trust_env)
+                self.assertEqual(dict(session.calls[0][1]["proxies"]), {})
 
     def test_springer_pagination_dedup_and_rate_limit(self):
         result, session = self.run_fake([

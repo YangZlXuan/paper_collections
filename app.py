@@ -40,7 +40,7 @@ def self_test(destination: Path) -> None:
     assert catalog and any(p.id == "springer" and p.enabled for p in catalog)
     assert any(p.id == "elsevier" and p.enabled for p in catalog)
     assert any(p.id == "wiley" and p.enabled for p in catalog)
-    wiley_config = WileyConfig(email="", output_dir=destination.parent, api_key="00000000-0000-4000-8000-000000000001")
+    wiley_config = WileyConfig(email="", output_dir=destination.parent, api_key="synthetic-wiley-token-for-offline-self-test")
     validate_wiley_config(wiley_config)
     assert wiley_config.interval == MIN_WILEY_INTERVAL == 10.0 and wiley_config.include_supplements
     assert wiley_config.api_key not in repr(wiley_config)

@@ -70,6 +70,13 @@ class SearchResult:
     cancelled: bool = False
 
 
+@dataclass
+class SearchPage(SearchResult):
+    """One publisher page; cursor is a zero-based scanned-record offset."""
+    next_cursor: int | None = None
+    scanned_count: int = 0
+
+
 def validate_search_config(config: SearchConfig) -> None:
     if config.publisher_id not in _ENDPOINTS:
         raise SearchError("关键词检索目前支持 Springer Nature、Elsevier 和 Wiley。")
@@ -464,6 +471,8 @@ def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None =
     scanned = 0
     try:
         with requests.Session() as session:
+            # Publisher requests must use the host's institutional network directly.
+            session.trust_env = False
             session.headers.update({"User-Agent": "PaperCollections/1.9 (publisher keyword discovery)"})
             client = _Client(session, config, event)
             for page in range(_MAX_PAGES):
@@ -541,4 +550,81 @@ def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None =
         result.truncated = True
         message = _redact(exc, config) if isinstance(exc, SearchError) else "检索网络请求失败。"
         _warn(result, "检索未完成，已保留部分结果：" + message)
+    return result
+
+
+def search_articles_page(config: SearchConfig, cursor: int | None = None, page_size: int = 25,
+                         on_log: Callable[[str], None] | None = None,
+                         cancel_event: threading.Event | None = None) -> SearchPage:
+    """Fetch one bounded page so the caller can exclude its own library between pages.
+
+    No project data or publisher cursor is cached here. Cross-page DOI/PII
+    deduplication and the total scan budget remain the caller's responsibility.
+    """
+    validate_search_config(config)
+    offset = 0 if cursor is None else cursor
+    if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset < _MAX_SCANNED:
+        raise SearchError("分页位置须为 0–5999 的整数。")
+    if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 25:
+        raise SearchError("单页检索数量须为 1–25 的整数。")
+    event = cancel_event if cancel_event is not None else threading.Event()
+    result = SearchPage([], source=_SOURCES[config.publisher_id])
+    start = offset if config.publisher_id == "elsevier" else offset + 1
+    fetch = {"springer": _springer_page, "elsevier": _elsevier_page, "wiley": _wiley_page}[config.publisher_id]
+    # ScienceDirect accepts its documented display sizes rather than arbitrary counts.
+    count = (10 if page_size <= 10 else 25) if config.publisher_id == "elsevier" else page_size
+    try:
+        with requests.Session() as session:
+            # Do not inherit HTTP(S)_PROXY, system proxies, or netrc credentials.
+            session.trust_env = False
+            session.headers.update({"User-Agent": "PaperCollections/1.9 (publisher keyword discovery)"})
+            client = _Client(session, config, event)
+            _check_cancel(event)
+            # Each page starts a fresh client: retain the existing interval across calls.
+            _wait(event, config.interval)
+            rows, result.total, next_page = fetch(client, start, count)
+            result.scanned_count = len(rows)
+            by_doi, by_pii = {}, {}
+            for row in rows:
+                _check_cancel(event)
+                item = _reference(row, config, result)
+                if item is None:
+                    continue
+                doi_match, pii_match = by_doi.get(item.doi), by_pii.get(item.pii)
+                old = doi_match or pii_match
+                if (doi_match is not None and pii_match is not None and doi_match is not pii_match) or (
+                    old and ((old.doi and item.doi and old.doi != item.doi)
+                             or (old.pii and item.pii and old.pii != item.pii))):
+                    _warn(result, "检索记录中的 DOI 与 PII 关联存在冲突，已跳过冲突记录。")
+                    continue
+                if old:
+                    old.doi, old.pii = old.doi or item.doi, old.pii or item.pii
+                    old.title, old.journal = old.title or item.title, old.journal or item.journal
+                    item = old
+                else:
+                    result.records.append(item)
+                if item.doi:
+                    item.url = "https://doi.org/" + quote(item.doi, safe="/")
+                    by_doi[item.doi] = item
+                if item.pii:
+                    by_pii[item.pii] = item
+            if not rows and offset < result.total:
+                result.truncated = True
+                _warn(result, "检索接口提前返回空页，结果可能不完整。")
+            elif next_page is not None:
+                next_offset = next_page if config.publisher_id == "elsevier" else next_page - 1
+                if next_offset <= offset or next_offset >= _MAX_SCANNED:
+                    result.truncated = True
+                    _warn(result, "已达到安全分页边界或分页位置未前进，已停止。")
+                else:
+                    result.next_cursor = next_offset
+            if on_log:
+                on_log(f"{result.source}：本页扫描 {len(rows)} 条，取得 {len(result.records)} 条标识。")
+    except DownloadCancelled:
+        result.cancelled, result.truncated = True, True
+        _warn(result, "检索已取消；保留已取得的结果。")
+    except requests.RequestException:
+        raise SearchError("检索网络请求失败，请检查网络后重试。") from None
+    except SearchError as exc:
+        raise SearchError(_redact(exc, config)) from None
     return result

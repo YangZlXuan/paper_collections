@@ -155,6 +155,8 @@ class _Client:
     def __init__(self, session: requests.Session, config: WileyConfig, event: threading.Event):
         validate_wiley_config(config)
         self.session, self.config, self.event = session, config, event
+        # Main files, supplements and redirects must use the institution's network.
+        self.session.trust_env = False
         self.interval = parse_wiley_interval(config.interval)
         self.last_request: float | None = None
         self.stop_reason = ""

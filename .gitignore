@@ -39,3 +39,5 @@ article.pdf
 
 # Local audit notes may contain personal paths and usage history
 /security_best_practices_report.md
+/.paper-analysis/
+/tmp/
