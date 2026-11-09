@@ -203,7 +203,7 @@ class FileParserTests(unittest.TestCase):
         with path.open('w', encoding='utf-8-sig', newline='') as handle:
             writer = csv.DictWriter(handle, fieldnames=['doi', 'pii', 'url', 'title', 'journal'])
             writer.writeheader()
-            writer.writerows(asdict(record) for record in records)
+            writer.writerows({name: getattr(record, name) for name in writer.fieldnames} for record in records)
         self.assertEqual(parse_doi_file(path).records, records)
 
     def test_xlsx_mixed_identifiers_across_sheets_and_title_banner(self):

@@ -114,10 +114,10 @@ def _redact(value: object, config: SearchConfig) -> str:
     return text
 
 
-def _clean(value: object, config: SearchConfig) -> str:
+def _clean(value: object, config: SearchConfig, limit: int = 2000) -> str:
     if not isinstance(value, str):
         return ""
-    return _redact(" ".join(unescape(re.sub(r"<[^>]*>", "", value)).split()), config)[:2000]
+    return _redact(" ".join(unescape(re.sub(r"<[^>]*>", "", value)).split()), config)[:limit]
 
 
 def _warn(result: SearchResult, message: str) -> None:
@@ -313,7 +313,8 @@ def _springer_page(client: _Client, start: int, count: int) -> tuple[list[dict],
         if isinstance(row, dict):
             entries.append({"doi": row.get("doi"), "title": row.get("title"),
                             "journals": [row.get("publicationName") or row.get("journalTitle") or ""],
-                            "date": row.get("publicationDate"), "pii": ""})
+                            "date": row.get("publicationDate"), "pii": "",
+                            "abstract": row.get("abstract"), "publication_type": row.get("contentType")})
         else:
             entries.append({})
     return entries, total, start + len(rows) if rows and start + len(rows) <= total else None
@@ -335,7 +336,8 @@ def _elsevier_page(client: _Client, start: int, count: int) -> tuple[list[dict],
     for row in rows:
         if isinstance(row, dict):
             entries.append({"doi": row.get("doi"), "pii": row.get("pii"), "title": row.get("title"),
-                            "journals": [row.get("sourceTitle") or ""], "date": row.get("publicationDate")})
+                            "journals": [row.get("sourceTitle") or ""], "date": row.get("publicationDate"),
+                            "abstract": row.get("abstract"), "publication_type": row.get("articleType")})
         else:
             entries.append({})
     return entries, total, start + len(rows) if rows and start + len(rows) < total else None
@@ -418,7 +420,8 @@ def _wiley_page(client: _Client, start: int, count: int) -> tuple[list[dict], in
         dois = list(dict.fromkeys(doi for value in identifiers if (doi := _doi_identifier(value))))
         entries.append({"doi": dois[0] if len(dois) == 1 else "", "pii": "",
                         "title": titles[0] if titles else "", "journals": _texts(data, "isPartOf"),
-                        "date": dates[0] if dates else ""})
+                        "date": dates[0] if dates else "", "abstract": " ".join(_texts(data, "description")),
+                        "publication_type": " ".join(_texts(data, "type"))})
     positions = _texts(root, "nextRecordPosition")
     next_page = _number(positions[0], "nextRecordPosition") if positions else None
     if next_page == 0:
@@ -452,7 +455,9 @@ def _reference(row: dict, config: SearchConfig, result: SearchResult) -> Article
         return None
     url = "https://doi.org/" + quote(doi, safe="/") if doi else "https://www.sciencedirect.com/science/article/pii/" + pii
     journal = next((value for value in journals if config.journal and normalize_journal(value) == normalize_journal(config.journal)), journals[0] if journals else "")
-    return ArticleReference(doi=doi, pii=pii, url=url, title=_clean(row.get("title"), config), journal=journal)
+    return ArticleReference(doi=doi, pii=pii, url=url, title=_clean(row.get("title"), config), journal=journal,
+                            abstract=_clean(row.get("abstract"), config, 6000),
+                            publication_type=_clean(row.get("publication_type"), config, 150))
 
 
 def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None = None,
@@ -502,6 +507,8 @@ def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None =
                             continue
                         old.doi, old.pii = old.doi or item.doi, old.pii or item.pii
                         old.title, old.journal = old.title or item.title, old.journal or item.journal
+                        old.abstract = old.abstract or item.abstract
+                        old.publication_type = old.publication_type or item.publication_type
                         if old.doi:
                             old.url = "https://doi.org/" + quote(old.doi, safe="/")
                             by_doi[old.doi] = old
@@ -600,6 +607,8 @@ def search_articles_page(config: SearchConfig, cursor: int | None = None, page_s
                 if old:
                     old.doi, old.pii = old.doi or item.doi, old.pii or item.pii
                     old.title, old.journal = old.title or item.title, old.journal or item.journal
+                    old.abstract = old.abstract or item.abstract
+                    old.publication_type = old.publication_type or item.publication_type
                     item = old
                 else:
                     result.records.append(item)

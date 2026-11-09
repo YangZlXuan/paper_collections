@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import asdict
 from pathlib import Path
 import signal
 import threading
@@ -73,10 +72,12 @@ def main(argv: list[str] | None = None) -> int:
         found = search_articles(config, on_log=print, cancel_event=cancel)
         args.results.parent.mkdir(parents=True, exist_ok=True)
         with args.results.open("x", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["doi", "pii", "url", "title", "journal"])
+            fields = ("doi", "pii", "url", "title", "journal")
+            writer = csv.DictWriter(handle, fieldnames=fields)
             writer.writeheader()
             for record in found.records:
-                writer.writerow({name: _csv_cell(value) for name, value in asdict(record).items()})
+                # Search-only metadata is not part of the importable reference CSV.
+                writer.writerow({name: _csv_cell(getattr(record, name)) for name in fields})
         print(f"来源：{found.source}；保留 {len(found.records)} 条文献。清单：{args.results}")
         for warning in found.warnings:
             print(warning)

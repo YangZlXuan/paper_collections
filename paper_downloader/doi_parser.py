@@ -32,6 +32,8 @@ class ArticleReference:
     url: str = ""
     title: str = ""
     journal: str = ""
+    abstract: str = ""
+    publication_type: str = ""
 
     @property
     def key(self) -> str:
