@@ -12,12 +12,14 @@ import tempfile
 
 def self_test(destination: Path) -> None:
     """Offline verification of dependencies and bundled catalog in a built EXE."""
+    from contextlib import closing
     import tkinter as tk
     import certifi
     import bs4
     import bibtexparser
     import openpyxl
     import requests
+    import sqlite3
     from paper_downloader import __version__
     from paper_downloader.catalog import load_catalog
     from paper_downloader.doi_parser import extract_dois, parse_doi_file, parse_reference_text
@@ -28,6 +30,7 @@ def self_test(destination: Path) -> None:
     from paper_downloader.credentials import _crypt
     from paper_downloader.updates import LATEST_RELEASE_API, parse_version
     from paper_downloader.search import SearchConfig, validate_search_config
+    from paper_downloader.request_quota import SPRINGER_DAILY_LIMIT, ELSEVIER_SEVEN_DAY_LIMIT
     from paper_downloader.gui import DownloaderApp
 
     parse_version(__version__)
@@ -70,11 +73,15 @@ def self_test(destination: Path) -> None:
             assert parsed.dois == ["10.1007/test-import"]
             assert len(parsed.records) == 1 and parsed.records[0].pii == sample_pii
     assert Path(certifi.where()).is_file()
+    with closing(sqlite3.connect(":memory:")) as connection:
+        assert connection.execute("SELECT 1").fetchone() == (1,)
     config = DownloadConfig(email="", output_dir=destination.parent)
     assert config.include_supplements and config.interval == MIN_REQUEST_INTERVAL == 2.0
     assert article_url("10.1038/s41586-021-03819-2") == "https://www.nature.com/articles/s41586-021-03819-2"
     app = DownloaderApp(check_updates=False)
     assert app.search_button.cget("text") == "关键词检索"
+    assert app.quota_refresh_button.cget("text") == "刷新额度"
+    assert set(app.quota_used_vars) == {"springer", "elsevier"}
     app.withdraw()
     app.update_idletasks()
     app.update()
@@ -83,6 +90,10 @@ def self_test(destination: Path) -> None:
     payload = {
         "ok": True,
         "version": __version__,
+        "local_request_limits": {"springer_per_day": SPRINGER_DAILY_LIMIT,
+                                 "springer_timezone": "UTC+08:00",
+                                 "elsevier_per_7_days": ELSEVIER_SEVEN_DAY_LIMIT},
+        "local_request_quota_display": True,
         "frozen": bool(getattr(sys, "frozen", False)),
         "python": sys.version.split()[0],
         "tk": str(tcl_version),

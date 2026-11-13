@@ -1,4 +1,4 @@
-"""Batch-download Elsevier PDFs and supplements with the desktop application's engine.
+"""Batch-download Elsevier full text and supplements with the desktop engine.
 
 The API key is read from os.environ via ElsevierKey, with ELSEVIER_API_KEY
 and the desktop's encrypted per-user store retained as fallbacks. The optional
@@ -19,13 +19,13 @@ from paper_downloader.downloader import parse_request_interval
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Elsevier / ScienceDirect 正文 PDF 与补充材料批量下载")
+    parser = argparse.ArgumentParser(description="Elsevier / ScienceDirect 正文与补充材料批量下载；PDF 仅首页时保存完整 XML")
     parser.add_argument("--input", type=Path, required=True, help="TXT / CSV / TSV / XLSX / RIS / BibTeX 文献文件")
     parser.add_argument("--output", type=Path, required=True, help="下载保存目录")
     parser.add_argument("--column", help="表格中的自定义 DOI / 链接列名")
     parser.add_argument("--journal", default="", help="完整期刊名；留空下载全部匹配文章")
     parser.add_argument("--interval", default="2", help="每次请求的间隔秒数，2–60，可输入小数")
-    parser.add_argument("--no-supplements", action="store_true", help="仅下载正文 PDF，不查询或下载补充材料")
+    parser.add_argument("--no-supplements", action="store_true", help="仅下载正文，不查询或下载补充材料")
     args = parser.parse_args(argv)
     try:
         credentials = load_elsevier_credentials()

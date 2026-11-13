@@ -19,6 +19,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.folder = Path(self.temp.name)
+        self.enterContext(patch("paper_downloader.request_quota.settings_path", return_value=self.folder / "settings.json"))
         self.source = self.folder / "dois.txt"
         self.source.write_text("10.1007/test-a\n10.1007/test-a\n10.1007/test-b\n", encoding="utf-8")
         self.load_patch = patch.object(gui, "load_settings", return_value={})
@@ -281,19 +282,44 @@ class GuiWorkflowTests(unittest.TestCase):
             self.app._open_selected_record()
             open_path.assert_called_once_with(record)
 
-    def test_small_window_preserves_table_and_scrolls_to_progress(self):
+    def test_xml_full_text_status_details_and_open_action(self):
+        self.parse()
+        result = DownloadResult(self.app._parsed.dois[0], "success", file_path=str(self.folder / "article.xml"))
+        self.app._render_result(result)
+        row = self.app._row_ids[result.doi]
+        self.assertEqual(self.app.table.item(row, "values")[1], "已下载（XML）")
+        self.app.table.selection_set(row)
+        self.app._show_result_details()
+        self.assertIn("完整 XML 正文", self.app.detail_var.get())
+        with patch.object(self.app, "_open_path") as open_path:
+            self.app._open_selected_pdf()
+        open_path.assert_called_once_with(Path(result.file_path))
+
+    def test_small_window_keeps_list_and_controls_visible(self):
         self.app.deiconify()
         self.app.geometry("900x650")
         self.app.update()
-        self.assertGreaterEqual(self.app.table.winfo_height(), 95)
-        self.assertGreater(self.app._content.winfo_height(), self.app._scroll_canvas.winfo_height())
+        self.assertGreaterEqual(self.app.table.winfo_height(), 300)
+        self.assertLessEqual(self.app.table.winfo_rooty() + self.app.table.winfo_height(),
+                             self.app.winfo_rooty() + self.app.winfo_height())
+        self.assertTrue(self.app.start_button.winfo_viewable())
+        self.assertTrue(self.app.cancel_button.winfo_viewable())
+        self.app.settings_button.invoke()
+        self.app.update()
+        self.assertEqual(self.app.notebook.select(), str(self.app._settings_tab))
+        self.assertFalse(self.app.table.winfo_viewable())
         self.app._show_progress_panel()
         self.app.update()
-        self.assertGreater(self.app._scroll_canvas.yview()[0], 0)
+        self.assertEqual(self.app.notebook.index(self.app.notebook.select()), 0)
+        self.assertTrue(self.app.table.winfo_viewable())
         self.app._show_access_settings()
         self.app.update()
-        self.assertIsNotNone(self.app._access_dialog)
         self.assertTrue(self.app._access_dialog.winfo_exists())
+
+    def test_import_returns_from_settings_to_paper_list(self):
+        self.app.notebook.select(self.app._settings_tab)
+        self.parse()
+        self.assertEqual(self.app.notebook.index(self.app.notebook.select()), 0)
 
     def test_empty_saved_cookie_path_displays_environment_default(self):
         cookie_path = str(self.folder / "environment.cookies")

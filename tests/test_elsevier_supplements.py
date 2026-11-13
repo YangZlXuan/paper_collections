@@ -23,8 +23,9 @@ OBJECTS = el._object_endpoint(ArticleReference(pii=PII)) + "?view=META"
 def docx_bytes():
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
-        archive.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
-        archive.writestr("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>')
+        # Stable ZIP timestamps keep independently built fixture bytes equal.
+        archive.writestr(zipfile.ZipInfo("[Content_Types].xml", (2020, 1, 1, 0, 0, 0)), '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+        archive.writestr(zipfile.ZipInfo("word/document.xml", (2020, 1, 1, 0, 0, 0)), '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>')
     return output.getvalue()
 
 
@@ -46,6 +47,7 @@ class ElsevierSupplementTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.output = Path(self.temp.name)
+        self.enterContext(patch("paper_downloader.request_quota.settings_path", return_value=self.output / "settings.json"))
         self.config = el.ElsevierConfig("", self.output, api_key=API_KEY, insttoken=INSTTOKEN, retries=0)
         self.now, self.waits = 0.0, []
         self.clock = patch.object(el.time, "monotonic", side_effect=lambda: self.now)

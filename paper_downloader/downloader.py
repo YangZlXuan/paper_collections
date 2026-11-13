@@ -438,7 +438,8 @@ def _read_manifest(path: Path) -> dict:
             return (isinstance(value, dict)
                     and all(isinstance(value.get(key), str) for key in ("url", "file", "status", "sha256"))
                     and isinstance(value.get("bytes"), int) and value["bytes"] >= 0)
-        record["pdf"] = record.get("pdf") if valid_asset(record.get("pdf")) else None
+        for name in ("pdf", "xml"):
+            record[name] = record.get(name) if valid_asset(record.get(name)) else None
         supplements = record.get("supplements")
         record["supplements"] = [item for item in supplements if valid_asset(item)] if isinstance(supplements, list) else []
         assets = record.get("assets")

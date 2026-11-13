@@ -1,4 +1,4 @@
-"""Elsevier Article/Object Retrieval API metadata, PDF and supplementary downloads.
+"""Elsevier Article/Object Retrieval API metadata, full text and supplements.
 
 API credentials are sent only as headers to api.elsevier.com. This module never
 uses browser cookies and never stores credentials or signed URL queries.
@@ -28,9 +28,10 @@ import requests
 
 from .catalog import normalize_journal
 from .doi_parser import ArticleReference, extract_dois, normalize_pii
+from .request_quota import RequestQuotaError, reserve_api_request
 from .downloader import (
     AccessDenied, BatchSummary, DownloadCancelled, DownloadConfig, DownloadResult,
-    _check_cancel, _digest, _looks_html, _read_manifest, _save_manifest,
+    _check_cancel, _digest, _existing_asset, _looks_html, _read_manifest, _save_manifest,
     is_valid_pdf, paper_directory_name, parse_request_interval,
 )
 
@@ -65,6 +66,10 @@ class _BatchStopped(AccessDenied):
 
 class _NotFound(ValueError):
     pass
+
+
+class _PdfPreview(AccessDenied):
+    """The publisher offers only the first page instead of the full PDF."""
 
 
 def validate_elsevier_config(config: ElsevierConfig) -> None:
@@ -188,55 +193,6 @@ class _Client:
                 seconds = max(self.interval, 2 ** attempt)
         return max(0.0, seconds) if math.isfinite(seconds) else _MAX_RETRY_WAIT + 1
 
-    def _auth_failure_kind(self, response: requests.Response) -> str:
-        status = response.headers.get("X-ELS-Status", "").upper()
-        if "AUTHENTICATION_ERROR" in status or "REQUESTOR CONFIGURATION" in status:
-            return "global"
-        # Some API versions return the error code only in the JSON body. Read
-        # a bounded error document, never include its text in messages or files.
-        try:
-            body = bytearray()
-            for chunk in response.iter_content(4096):
-                _check_cancel(self.event)
-                if len(body) + len(chunk) > 16 * 1024:
-                    return "unknown"
-                body.extend(chunk)
-        except requests.RequestException:
-            return "unknown"
-        try:
-            document = json.loads(body)
-        except (ValueError, UnicodeError, RecursionError):
-            # Elsevier documents XML service-error payloads for 401/403 too.
-            if b"<!DOCTYPE" in bytes(body).upper():
-                return "unknown"
-            try:
-                root = ET.fromstring(body)
-                document = {element.tag.rsplit("}", 1)[-1]: element.text or "" for element in root.iter()}
-            except (ET.ParseError, ValueError):
-                return "unknown"
-        def error_fields(value: object) -> tuple[list[str], list[str]]:
-            if not isinstance(value, dict):
-                return [], []
-            found, messages = [], []
-            for key, child in value.items():
-                if key.casefold() in {"error-code", "statuscode", "errorcode"} and isinstance(child, str):
-                    found.append(child.upper())
-                elif key.casefold() in {"statusText".casefold(), "error-message", "errormessage"} and isinstance(child, str):
-                    messages.append(child.upper())
-                elif isinstance(child, dict):
-                    child_codes, child_messages = error_fields(child)
-                    found.extend(child_codes)
-                    messages.extend(child_messages)
-            return found, messages
-        codes, messages = error_fields(document)
-        if any(code in {"AUTHENTICATION_ERROR", "INVALID_API_KEY", "INVALID_APIKEY", "APIKEY_INVALID", "KEY_MISSING", "APIKEY_MISSING"} for code in codes):
-            return "global"
-        if any(phrase in message for message in messages for phrase in ("NO APIKEY PROVIDED", "REQUESTOR CONFIGURATION", "INVALID APIKEY", "API KEY IS INVALID")):
-            return "global"
-        if any("ENTITLEMENT" in code or "SUBSCRIPTION" in code for code in codes):
-            return "entitlement"
-        return "unknown"
-
     def request(self, url: str, *, pdf: bool = False, accept: str | None = None,
                 document_scoped: bool = False) -> requests.Response:
         for redirect in range(7):
@@ -260,6 +216,11 @@ class _Client:
                         prepared.headers["X-ELS-Insttoken"] = self.config.insttoken.strip()
                 prepared.headers["Accept"] = accept or ("application/pdf" if pdf else "application/json")
                 settings = self.session.merge_environment_settings(prepared.url, {}, True, None, None)
+                try:
+                    reserve_api_request(prepared.url)
+                except RequestQuotaError as exc:
+                    self.stop_reason = str(exc)
+                    raise _BatchStopped(self.stop_reason) from None
                 self.last_request = time.monotonic()
                 try:
                     response = self.session.send(prepared, timeout=(min(15.0, self.config.timeout), self.config.timeout),
@@ -276,15 +237,16 @@ class _Client:
                     raise
                 self._update_quota(response)
                 code = response.status_code
+                # A first-page PDF is valid PDF data, but is not the full text.
+                # Check before following redirects so this warning is not lost.
+                if pdf and "response limited to first page" in response.headers.get("X-ELS-Status", "").lower():
+                    response.close()
+                    raise _PdfPreview("Elsevier PDF 仅提供首页，改为下载完整 XML 正文。")
                 if code in (401, 403):
-                    try:
-                        auth_kind = self._auth_failure_kind(response)
-                    finally:
-                        response.close()
-                    if auth_kind == "global" or (code == 401 and not pdf and not document_scoped and auth_kind == "unknown"):
-                        self.stop_reason = f"Elsevier API 配置或机构访问条件不满足（HTTP {code}），批次已停止。请检查 API Key 配置、机构 IP/VPN 和接口授权。"
-                        raise _BatchStopped(self.stop_reason)
-                    raise AccessDenied(f"Elsevier 拒绝访问此文献（HTTP {code}）。请检查机构订阅或 PDF 格式授权；元数据可读不代表可下载正文。")
+                    response.close()
+                    # Access may differ by article, format or API endpoint.
+                    # Record this failure without pausing the remaining queue.
+                    raise AccessDenied(f"Elsevier 拒绝访问此文献（HTTP {code}）。请检查 API Key、机构访问和接口/订阅授权；元数据可读不代表可下载正文。")
                 if code == 429:
                     delay = self._retry_delay(response, attempt)
                     response.close()
@@ -667,33 +629,38 @@ def _reuse_supplement(client: _Client, descriptor: dict, target: Path, previous:
         "final_url": _public_url(previous.get("final_url", "")), "status": "exists", "bytes": size, "sha256": digest}
 
 
-def _download_pdf(client: _Client, endpoint: str, target: Path) -> dict:
+def _download_pdf(client: _Client, endpoint: str, target: Path, *, existing: dict | None = None) -> dict:
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.part")
     try:
         for attempt in range(client.config.retries + 1):
             response = client.request(endpoint, pdf=True)
             try:
-                with response, temporary.open("wb") as handle:
+                with response:
                     content_type = response.headers.get("Content-Type", "").lower()
                     if any(kind in content_type for kind in ("html", "json", "xml")):
                         raise AccessDenied("Elsevier 未返回正文 PDF。元数据可读不代表具有 PDF 格式或机构订阅权限。")
+                    # Old manifests did not retain the publisher's preview warning.
+                    # Recheck headers once, while retaining an intact local PDF.
+                    if existing is not None:
+                        return {**existing, "full_text_verified": True}
                     length = response.headers.get("Content-Length", "")
                     expected = int(length) if length.isdigit() else None
                     if expected is not None and expected > _MAX_FILE:
                         raise ValueError("PDF 超过 150 MB。")
                     size, digest, prefix = 0, hashlib.sha256(), b""
-                    for chunk in response.iter_content(128 * 1024):
-                        _check_cancel(client.event)
-                        if not chunk:
-                            continue
-                        size += len(chunk)
-                        if size > _MAX_FILE:
-                            raise ValueError("PDF 超过 150 MB。")
-                        prefix = (prefix + chunk)[:4096]
-                        if _looks_html(prefix):
-                            raise AccessDenied("Elsevier 文件地址返回 HTML 登录或错误页面，未保存为 PDF。")
-                        digest.update(chunk)
-                        handle.write(chunk)
+                    with temporary.open("wb") as handle:
+                        for chunk in response.iter_content(128 * 1024):
+                            _check_cancel(client.event)
+                            if not chunk:
+                                continue
+                            size += len(chunk)
+                            if size > _MAX_FILE:
+                                raise ValueError("PDF 超过 150 MB。")
+                            prefix = (prefix + chunk)[:4096]
+                            if _looks_html(prefix):
+                                raise AccessDenied("Elsevier 文件地址返回 HTML 登录或错误页面，未保存为 PDF。")
+                            digest.update(chunk)
+                            handle.write(chunk)
                     if expected is not None and not response.headers.get("Content-Encoding") and size != expected:
                         raise ValueError("PDF 传输不完整：实际大小与 Content-Length 不一致。")
                     final_url = _public_url(response.url or endpoint)
@@ -702,7 +669,7 @@ def _download_pdf(client: _Client, endpoint: str, target: Path) -> dict:
                     raise ValueError("返回内容不是完整 PDF（文件为空或缺少 PDF 标记）。")
                 temporary.replace(target)
                 return {"url": _public_url(endpoint), "final_url": final_url, "file": target.name,
-                        "status": "success", "bytes": size, "sha256": digest.hexdigest()}
+                        "status": "success", "bytes": size, "sha256": digest.hexdigest(), "full_text_verified": True}
             except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError):
                 if attempt == client.config.retries:
                     raise
@@ -712,13 +679,73 @@ def _download_pdf(client: _Client, endpoint: str, target: Path) -> dict:
     raise ValueError("Elsevier PDF 下载失败。")
 
 
+def _download_xml(client: _Client, endpoint: str, target: Path, reference: ArticleReference) -> dict:
+    """Save FULL-view XML only when it contains the requested article's body."""
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.part")
+    try:
+        for attempt in range(client.config.retries + 1):
+            response = client.request(endpoint + "?view=FULL", accept="text/xml", document_scoped=True)
+            try:
+                with response, temporary.open("wb") as handle:
+                    if "xml" not in response.headers.get("Content-Type", "").lower():
+                        raise ValueError("Elsevier 未返回 XML 正文。")
+                    length = response.headers.get("Content-Length", "")
+                    expected = int(length) if length.isdigit() else None
+                    if expected is not None and expected > _MAX_FILE:
+                        raise ValueError("XML 正文超过 150 MB。")
+                    size, digest = 0, hashlib.sha256()
+                    for chunk in response.iter_content(128 * 1024):
+                        _check_cancel(client.event)
+                        size += len(chunk)
+                        if size > _MAX_FILE:
+                            raise ValueError("XML 正文超过 150 MB。")
+                        handle.write(chunk)
+                        digest.update(chunk)
+                    if expected is not None and not response.headers.get("Content-Encoding") and size != expected:
+                        raise ValueError("XML 传输不完整：实际大小与 Content-Length 不一致。")
+                _check_cancel(client.event)
+                body = temporary.read_bytes()
+                declarations = body.replace(b"\x00", b"").upper()
+                if b"<!DOCTYPE" in declarations or b"<!ENTITY" in declarations:
+                    raise ValueError("XML 正文包含不支持的 DTD 或实体声明。")
+                try:
+                    root = ET.fromstring(body)
+                except ET.ParseError:
+                    raise ValueError("Elsevier 返回的 XML 正文不完整或格式无效。") from None
+                if root.tag.rsplit("}", 1)[-1] != "full-text-retrieval-response":
+                    raise ValueError("Elsevier 未返回全文 XML 响应。")
+                core = root.find("{*}coredata")
+                actual_doi = core.findtext("{*}doi", "").strip().lower() if core is not None else ""
+                actual_pii = normalize_pii(core.findtext("{*}pii", "")) if core is not None else ""
+                if ((reference.doi and actual_doi != reference.doi.lower())
+                        or (not reference.doi and actual_pii != normalize_pii(reference.pii))):
+                    raise ValueError("XML 正文的 DOI / PII 与请求文献不一致。")
+                original = root.find("{*}originalText")
+                if original is None or not any(
+                    element.tag.rsplit("}", 1)[-1] in {"body", "rawtext"}
+                    and any(text.strip() for text in element.itertext()) for element in original.iter()
+                ):
+                    raise AccessDenied("Elsevier XML 仅包含元数据或摘要，未提供完整正文。")
+                _check_cancel(client.event)
+                temporary.replace(target)
+                return {"url": _public_url(endpoint), "view": "FULL", "file": target.name,
+                        "status": "success", "bytes": size, "sha256": digest.hexdigest()}
+            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError):
+                if attempt == client.config.retries:
+                    raise
+                _wait(client.event, min(8.0, 0.5 * 2 ** attempt))
+    finally:
+        temporary.unlink(missing_ok=True)
+    raise ValueError("Elsevier XML 正文下载失败。")
+
+
 def _process(client: _Client, reference: ArticleReference) -> DownloadResult:
     result = DownloadResult(doi=reference.doi, pii=reference.pii, reference_key=reference.key, status="failed",
                             supplements_status="" if client.config.include_supplements else "disabled")
     directory = Path(client.config.output_dir) / ("elsevier_" + paper_directory_name(reference.key))
     path = directory / "manifest.json"
     record = {"schema_version": 2, "publisher": "Elsevier", "reference_key": reference.key,
-              "doi": reference.doi, "pii": reference.pii, "title": "", "journal": "", "pdf": None,
+              "doi": reference.doi, "pii": reference.pii, "title": "", "journal": "", "pdf": None, "xml": None,
               "status": "in_progress", "include_supplements": client.config.include_supplements,
               "supplements": [], "assets": {}, "supplement_discovery": {
                   "status": "not_attempted" if client.config.include_supplements else "disabled"}, "errors": []}
@@ -731,6 +758,7 @@ def _process(client: _Client, reference: ArticleReference) -> DownloadResult:
         result.record_path = str(path.resolve())
         previous = _read_manifest(path)
         record["pdf"] = previous.get("pdf")
+        record["xml"] = previous.get("xml")
         record["assets"] = dict(previous.get("assets") or {})
         for asset in previous.get("supplements", []):
             if asset.get("status") in {"success", "exists"}:
@@ -754,16 +782,45 @@ def _process(client: _Client, reference: ArticleReference) -> DownloadResult:
             if previous_pdf.get("sha256") and (previous_pdf["sha256"] != digest or previous_pdf.get("bytes") != size):
                 reuse = False
         try:
+            if previous_pdf.get("status") == "preview":
+                raise _PdfPreview("Elsevier PDF 仅提供首页，改为下载完整 XML 正文。")
             if reuse:
                 pdf = {"url": _public_url(previous_pdf.get("url", endpoint)),
                        "final_url": _public_url(previous_pdf.get("final_url", "")), "file": "article.pdf",
-                       "status": "exists", "bytes": size, "sha256": digest}
+                       "status": "exists", "bytes": size, "sha256": digest, "full_text_verified": True}
+                if not previous_pdf.get("full_text_verified"):
+                    pdf = _download_pdf(client, endpoint, target, existing=pdf)
             else:
                 pdf = _download_pdf(client, endpoint, target)
             record["pdf"] = pdf
             main_status = pdf["status"]
             result.file_path, result.pdf_url = str(target.resolve()), pdf["url"]
             _save_manifest(path, record)
+        except _PdfPreview as exc:
+            record["pdf"] = {**previous_pdf, "url": _public_url(endpoint), "file": "article.pdf",
+                             "status": "preview", "bytes": previous_pdf.get("bytes", 0),
+                             "sha256": previous_pdf.get("sha256", ""), "error": str(exc)}
+            # Keep the preview record even if XML is interrupted, so resuming
+            # does not request the same inaccessible PDF again.
+            _save_manifest(path, record)
+            xml_target = directory / "article.xml"
+            try:
+                xml = _existing_asset(xml_target, _public_url(endpoint), previous.get("xml") or {}, client.event)
+                if xml is None:
+                    xml = _download_xml(client, endpoint, xml_target, ArticleReference(doi=result.doi, pii=result.pii))
+                record["xml"] = xml
+                main_status = xml["status"]
+                result.file_path = str(xml_target.resolve())
+                _save_manifest(path, record)
+            except (DownloadCancelled, _BatchStopped):
+                raise
+            except (AccessDenied, _NotFound, ValueError, OSError, requests.RequestException) as xml_exc:
+                main_status = "access_denied" if isinstance(xml_exc, AccessDenied) else "no_pdf" if isinstance(xml_exc, _NotFound) else "failed"
+                message = "PDF 仅提供首页；XML 正文: " + _safe_error(xml_exc, client.config)
+                record["errors"].append(message)
+                record["xml"] = {"url": _public_url(endpoint), "view": "FULL", "file": "article.xml",
+                                 "status": main_status, "bytes": 0, "sha256": "", "error": message}
+                _save_manifest(path, record)
         except (DownloadCancelled, _BatchStopped):
             raise
         except (AccessDenied, _NotFound, ValueError, OSError, requests.RequestException) as exc:
@@ -859,6 +916,52 @@ def _process(client: _Client, reference: ArticleReference) -> DownloadResult:
     return result
 
 
+def exclude_downloaded_references(records: list[ArticleReference], output_dir: Path, *,
+                                  include_supplements: bool = False,
+                                  cancel_event: threading.Event | None = None) -> tuple[list[ArticleReference], int]:
+    """Exclude completed DOI/PII records using the existing per-paper manifests."""
+    if not records or not output_dir.exists():
+        return list(records), 0
+    if not output_dir.is_dir():
+        raise ValueError("下载保存位置不是文件夹，无法检查已完成文献。")
+    event = cancel_event if cancel_event is not None else threading.Event()
+    by_doi = {reference.doi: reference for reference in records if reference.doi}
+    by_pii = {reference.pii: reference for reference in records if reference.pii}
+    completed: set[str] = set()
+    for path in output_dir.glob("elsevier_*/manifest.json"):
+        _check_cancel(event)
+        record = _read_manifest(path)
+        if record.get("publisher") != "Elsevier" or record.get("status") not in {"success", "exists"}:
+            continue
+        if include_supplements:
+            if record.get("supplements_status") not in {"none", "complete"}:
+                continue
+            if any(not _existing_asset(path.parent / asset["file"], asset["url"], asset, event)
+                   for asset in record.get("supplements", [])):
+                continue
+        doi, pii = record.get("doi", ""), record.get("pii", "")
+        if not isinstance(doi, str) or not isinstance(pii, str):
+            continue
+        doi, pii = doi.strip().lower(), normalize_pii(pii)
+        candidates = [reference for reference in (by_doi.get(doi), by_pii.get(pii))
+                      if reference is not None
+                      and not (reference.doi and doi and reference.doi != doi)
+                      and not (reference.pii and pii and reference.pii != pii)]
+        if not candidates:
+            continue
+        assets = [("article.xml", record.get("xml"))]
+        pdf = record.get("pdf") or {}
+        if pdf.get("full_text_verified") is True:
+            assets.append(("article.pdf", pdf))
+        # Reuse the downloader's existing size/digest checks. A preview, missing
+        # file, or damaged file must remain eligible for a repair download.
+        if any(asset and _existing_asset(path.parent / name, asset["url"], asset, event)
+               for name, asset in assets):
+            completed.update(reference.key for reference in candidates)
+    remaining = [reference for reference in records if reference.key not in completed]
+    return remaining, len(records) - len(remaining)
+
+
 def run_elsevier_batch(records: list[ArticleReference], config: ElsevierConfig,
                        on_result: Callable[[int, int, DownloadResult], None] | None = None,
                        on_log: Callable[[str], None] | None = None,
@@ -891,7 +994,8 @@ def run_elsevier_batch(records: list[ArticleReference], config: ElsevierConfig,
             if on_result:
                 on_result(index, len(records), result)
             if on_log:
-                on_log(f"[{index}/{len(records)}] {_redact(reference.key, config)}：{_LABELS.get(result.status, result.status)}"
+                format_label = "（XML 正文）" if Path(result.file_path).suffix.lower() == ".xml" else ""
+                on_log(f"[{index}/{len(records)}] {_redact(reference.key, config)}：{_LABELS.get(result.status, result.status)}{format_label}"
                        + (f"（{result.error}）" if result.error else ""))
             if result.status == "cancelled" or event.is_set():
                 summary.cancelled = True

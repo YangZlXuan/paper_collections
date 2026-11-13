@@ -407,11 +407,100 @@ class KeywordSearchGuiTests(unittest.TestCase):
         dialog.geometry("720x480")
         dialog.deiconify()
         self.app.update()
-        for widget in (dialog.search_button, dialog.import_button, dialog.cancel_button, dialog.journal_filter_combo):
+        for widget in (dialog.search_button, dialog.continue_button, dialog.start_position_entry, dialog.skip_downloaded_check, dialog.import_button, dialog.cancel_button, dialog.journal_filter_combo):
             self.assertGreaterEqual(widget.winfo_rootx(), dialog.winfo_rootx())
             self.assertGreaterEqual(widget.winfo_rooty(), dialog.winfo_rooty())
             self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(), dialog.winfo_rootx() + dialog.winfo_width())
             self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), dialog.winfo_rooty() + dialog.winfo_height())
+
+
+    def test_manual_start_position_1001_reaches_search_config(self):
+        self.app.api_key_var.set("synthetic-elsevier-key")
+        dialog = self.open_search("elsevier")
+        dialog.start_position_var.set("1001")
+        with patch.object(gui, "search_articles", return_value=SearchResult([])) as search:
+            dialog.start()
+            self.wait_for(lambda: not self.app._busy)
+        self.assertEqual(search.call_args.args[0].start_offset, 1000)
+
+    def test_continue_uses_returned_cursor_and_disables_when_exhausted(self):
+        dialog = self.open_search()
+        batches = [SearchResult([ArticleReference(doi="10.1007/first")], total=1507, truncated=True, next_cursor=1000),
+                   SearchResult([ArticleReference(doi="10.1007/last")], total=1507)]
+        with patch.object(gui, "search_articles", side_effect=batches) as search:
+            dialog.start()
+            self.wait_for(lambda: not self.app._busy)
+            self.assertEqual(str(dialog.continue_button.cget("state")), "normal")
+            dialog.continue_button.invoke()
+            self.wait_for(lambda: not self.app._busy)
+        self.assertEqual([call.args[0].start_offset for call in search.call_args_list], [0, 1000])
+        self.assertEqual([record.doi for record in dialog.records.values()], ["10.1007/last"])
+        self.assertEqual(str(dialog.continue_button.cget("state")), "disabled")
+
+    def test_continuation_survives_import_and_reopening_dialog(self):
+        dialog = self.open_search()
+        self.complete_search(dialog, SearchResult([ArticleReference(doi="10.1007/first")], next_cursor=1000))
+        dialog.import_selection()
+        self.app._show_search_dialog()
+        reopened = self.app._search_dialog
+        self.assertEqual(reopened._next_cursor, 1000)
+        with patch.object(gui, "search_articles", return_value=SearchResult([])) as search:
+            reopened.continue_button.invoke()
+            self.wait_for(lambda: not self.app._busy)
+        self.assertEqual(search.call_args.args[0].start_offset, 1000)
+
+    def test_changed_query_invalidates_continuation(self):
+        dialog = self.open_search()
+        self.complete_search(dialog, SearchResult([], next_cursor=1000))
+        dialog.keywords_var.set("new keyword")
+        self.assertIsNone(dialog._next_cursor)
+        self.assertEqual(str(dialog.continue_button.cget("state")), "disabled")
+
+    def test_completed_exclusion_runs_off_ui_thread_and_empty_batch_can_continue(self):
+        self.app.api_key_var.set("synthetic-elsevier-key")
+        dialog = self.open_search("elsevier")
+        reference = ArticleReference(doi="10.1016/completed")
+        thread_ids = []
+        def exclude(records, output, **kwargs):
+            thread_ids.append(threading.get_ident())
+            self.assertEqual(output, self.folder / "output")
+            return [], 1
+        with patch.object(gui, "search_articles", return_value=SearchResult([reference], next_cursor=1000)), \
+                patch.object(gui, "exclude_downloaded_references", side_effect=exclude):
+            dialog.start()
+            self.wait_for(lambda: not self.app._busy)
+        self.assertNotEqual(thread_ids[0], threading.get_ident())
+        self.assertFalse(dialog.records)
+        self.assertIn("已跳过", dialog.status_var.get())
+        self.assertEqual(str(dialog.import_button.cget("state")), "disabled")
+        self.assertEqual(str(dialog.continue_button.cget("state")), "normal")
+
+    def test_cancel_during_local_scan_retries_batch_without_losing_its_rows(self):
+        self.app.api_key_var.set("synthetic-elsevier-key")
+        dialog = self.open_search("elsevier")
+        entered = threading.Event()
+        def exclude(records, output, **kwargs):
+            entered.set()
+            kwargs["cancel_event"].wait(2)
+            raise gui.DownloadCancelled()
+        with patch.object(gui, "search_articles", return_value=SearchResult([ArticleReference(doi="10.1016/one")], next_cursor=1000)), \
+                patch.object(gui, "exclude_downloaded_references", side_effect=exclude):
+            dialog.start()
+            self.wait_for(entered.is_set)
+            dialog.cancel()
+            self.wait_for(lambda: not self.app._busy)
+        self.assertFalse(dialog.records)
+        self.assertEqual(dialog._next_cursor, 0)
+        self.assertIn("本批起始位置", dialog.status_var.get())
+
+    def test_invalid_start_positions_do_not_start_search(self):
+        dialog = self.open_search()
+        for position in ("0", "6001", "abc", "1.5"):
+            with self.subTest(position=position), patch.object(gui, "search_articles") as search:
+                dialog.start_position_var.set(position)
+                dialog.start()
+                search.assert_not_called()
+
 
 
 if __name__ == "__main__":

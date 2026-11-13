@@ -24,6 +24,7 @@ import requests
 from .catalog import normalize_journal
 from .doi_parser import ArticleReference, DOI_RE, extract_dois, normalize_pii
 from .downloader import DownloadCancelled, _check_cancel
+from .request_quota import RequestQuotaError, reserve_api_request
 
 
 SPRINGER_ENDPOINT = "https://api.springernature.com/meta/v2/json"
@@ -58,6 +59,7 @@ class SearchConfig:
     retries: int = 2
     api_key: str = field(default="", repr=False)
     insttoken: str = field(default="", repr=False)
+    start_offset: int = 0
 
 
 @dataclass
@@ -68,6 +70,8 @@ class SearchResult:
     warnings: list[str] = field(default_factory=list)
     source: str = ""
     cancelled: bool = False
+    next_cursor: int | None = None
+    skipped_downloaded: int = 0
 
 
 @dataclass
@@ -93,6 +97,8 @@ def validate_search_config(config: SearchConfig) -> None:
         raise SearchError("开始年份不能晚于结束年份。")
     if isinstance(config.max_results, bool) or not isinstance(config.max_results, int) or not 1 <= config.max_results <= 1000:
         raise SearchError("检索篇数上限须为 1–1000 的整数。")
+    if isinstance(config.start_offset, bool) or not isinstance(config.start_offset, int) or not 0 <= config.start_offset < _MAX_SCANNED:
+        raise SearchError("起始序号须为 1–6000 的整数。")
     for name, value, minimum, maximum in (("请求间隔", config.interval, 2, 60), ("请求超时", config.timeout, 1, 300)):
         if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or not minimum <= value <= maximum:
             raise SearchError(f"{name}须为 {minimum}–{maximum} 秒的有效数字。")
@@ -216,6 +222,10 @@ class _Client:
                         prepared.headers["X-ELS-Insttoken"] = self.config.insttoken.strip()
                 prepared.headers["Accept"] = "application/xml" if xml else "application/json"
                 settings = self.session.merge_environment_settings(prepared.url, {}, True, None, None)
+                try:
+                    reserve_api_request(prepared.url)
+                except RequestQuotaError as exc:
+                    raise SearchError(str(exc)) from None
                 self.last_request = time.monotonic()
                 try:
                     response = self.session.send(prepared, allow_redirects=False,
@@ -247,7 +257,8 @@ class _Client:
                             continue
                         if status in _TRANSIENT and attempt < self.config.retries:
                             continue
-                        if status >= 400:
+                        springer_not_found = status == 404 and self.config.publisher_id == "springer"
+                        if status >= 400 and not springer_not_found:
                             raise SearchError(f"{_SOURCES[self.config.publisher_id]} 返回 HTTP {status}，请检查检索条件、接口权限或稍后重试。")
                         kind = response.headers.get("Content-Type", "").casefold()
                         if "html" in kind:
@@ -264,6 +275,16 @@ class _Client:
                         if raw_length.isdigit() and not response.headers.get("Content-Encoding") and len(body) != int(raw_length):
                             raise SearchError("检索响应传输不完整。")
                         self.quota_exhausted = response.headers.get("X-RateLimit-Remaining") == "0"
+                        if springer_not_found:
+                            # Meta uses 404 for an empty search as well as for actual failures.
+                            try:
+                                error_body = json.loads(body)
+                            except (ValueError, UnicodeError, RecursionError):
+                                error_body = None
+                            if (isinstance(error_body, dict) and error_body.get("status") == "Fail"
+                                    and error_body.get("message") == "No data was found for the given query."):
+                                return b'{"result":[{"total":0}],"records":[]}'
+                            raise SearchError("Springer Meta API 返回 HTTP 404，未确认检索无匹配；请检查接口配置。")
                         return bytes(body)
                 except _STREAM_ERRORS:
                     if attempt == self.config.retries:
@@ -464,10 +485,11 @@ def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None =
                     cancel_event: threading.Event | None = None) -> SearchResult:
     validate_search_config(config)
     event = cancel_event if cancel_event is not None else threading.Event()
-    result = SearchResult([], source=_SOURCES[config.publisher_id])
+    result = SearchResult([], source=_SOURCES[config.publisher_id], next_cursor=config.start_offset)
     if config.publisher_id == "springer" and config.journal.strip():
         _warn(result, "Springer 基础 Meta Key 不支持按期刊检索，已在关键词结果中本地精确筛选期刊；接口总命中数属于关键词检索，非所选期刊总量。")
-    start = 0 if config.publisher_id == "elsevier" else 1
+    position_base = 0 if config.publisher_id == "elsevier" else 1
+    start = config.start_offset + position_base
     fetch = {"springer": _springer_page, "elsevier": _elsevier_page, "wiley": _wiley_page}[config.publisher_id]
     page_size = 25 if config.publisher_id == "elsevier" else 20
     visited: set[tuple] = set()
@@ -481,11 +503,14 @@ def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None =
             session.headers.update({"User-Agent": "PaperCollections/1.9 (publisher keyword discovery)"})
             client = _Client(session, config, event)
             for page in range(_MAX_PAGES):
+                result.next_cursor = start - position_base
                 _check_cancel(event)
                 rows, total, next_page = fetch(client, start, page_size)
+                rows = rows[:_MAX_SCANNED - (start - position_base)]
                 result.total = total
                 signature = tuple((str(row.get("doi", "")), str(row.get("pii", "")), str(row.get("title", ""))) for row in rows)
                 if rows and signature in visited:
+                    result.next_cursor = None
                     result.truncated = True
                     _warn(result, "检索接口重复返回同一页，已停止继续分页；结果可能不完整。")
                     break
@@ -493,6 +518,9 @@ def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None =
                 scanned += len(rows)
                 for index, row in enumerate(rows):
                     _check_cancel(event)
+                    # Track the next unprocessed source row, including filtered
+                    # rows, so a batch ending mid-page cannot lose its remainder.
+                    result.next_cursor = start - position_base + index + 1
                     item = _reference(row, config, result)
                     if item is None:
                         continue
@@ -522,27 +550,34 @@ def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None =
                         by_pii[item.pii] = item
                     if len(result.records) >= config.max_results:
                         result.truncated = next_page is not None or index < len(rows) - 1
+                        if not result.truncated or result.next_cursor >= _MAX_SCANNED:
+                            result.next_cursor = None
                         if result.truncated:
-                            _warn(result, "已达到本次检索篇数上限；可缩小关键词、期刊或年份范围继续检索。")
+                            _warn(result, "已达到本批检索篇数上限；可点击“继续检索下一批”，或收窄年份范围。")
                         break
                 if on_log:
                     on_log(f"{result.source}：已查询 {page + 1} 页，取得 {len(result.records)} 条可下载标识。")
                 if len(result.records) >= config.max_results:
                     break
                 if not rows:
+                    result.next_cursor = None
                     if (start if config.publisher_id == "elsevier" else start - 1) < total:
                         result.truncated = True
                         _warn(result, "检索接口提前返回空页，结果可能不完整。")
                     break
                 if next_page is None:
+                    result.next_cursor = None
                     break
                 if next_page <= start:
+                    result.next_cursor = None
                     result.truncated = True
                     _warn(result, "检索接口分页位置未前进，已停止；结果可能不完整。")
                     break
-                if scanned >= _MAX_SCANNED or next_page >= _MAX_SCANNED or page == _MAX_PAGES - 1:
+                next_offset = next_page - position_base
+                result.next_cursor = next_offset if next_offset < _MAX_SCANNED else None
+                if scanned >= _MAX_SCANNED or next_offset >= _MAX_SCANNED or page == _MAX_PAGES - 1:
                     result.truncated = True
-                    _warn(result, "已达到本次安全分页上限，结果可能不完整；请缩小年份或关键词范围。")
+                    _warn(result, "已达到本次安全分页上限，结果可能不完整；可继续下一批或缩小年份范围。")
                     break
                 start = next_page
     except DownloadCancelled:
@@ -569,7 +604,7 @@ def search_articles_page(config: SearchConfig, cursor: int | None = None, page_s
     deduplication and the total scan budget remain the caller's responsibility.
     """
     validate_search_config(config)
-    offset = 0 if cursor is None else cursor
+    offset = config.start_offset if cursor is None else cursor
     if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset < _MAX_SCANNED:
         raise SearchError("分页位置须为 0–5999 的整数。")
     if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 25:

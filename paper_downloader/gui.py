@@ -23,9 +23,10 @@ from .doi_parser import ArticleReference, ParseResult, parse_doi_file, parse_ref
 from .credentials import clear_elsevier_credentials, load_elsevier_credentials, load_springer_meta_credentials, load_wiley_credentials, save_elsevier_credentials
 from .downloader import (
     MAX_REQUEST_INTERVAL, MIN_REQUEST_INTERVAL, BatchSummary, DownloadConfig,
-    DownloadResult, parse_request_interval, run_batch, validate_config,
+    DownloadCancelled, DownloadResult, parse_request_interval, run_batch, validate_config,
 )
-from .elsevier import ElsevierConfig, run_elsevier_batch, validate_elsevier_config
+from .elsevier import ElsevierConfig, exclude_downloaded_references, run_elsevier_batch, validate_elsevier_config
+from .request_quota import RequestQuotaError, get_request_quotas
 from .settings import load_settings, save_settings
 from .search import SearchConfig, SearchResult, search_articles, validate_search_config
 from .updates import UpdateCheckError, UpdateResult, check_for_update
@@ -59,6 +60,7 @@ class DownloaderApp(tk.Tk):
         self._cancel = threading.Event()
         self._worker: threading.Thread | None = None
         self._poll_id: str | None = None
+        self._quota_poll_id: str | None = None
         self._startup_update_id: str | None = None
         self._checking_updates = False
         self._update_manual = False
@@ -137,10 +139,15 @@ class DownloaderApp(tk.Tk):
         self.progress_text_var = tk.StringVar(value="尚未开始")
         self.status_var = tk.StringVar(value="就绪")
         self.update_status_var = tk.StringVar(value=f"当前版本 {__version__}")
+        self.quota_status_var = tk.StringVar(value="本地 API 请求额度 · 北京时间 · 每 2 秒更新")
+        self.quota_used_vars = {publisher: tk.StringVar(value="读取中…") for publisher in ("springer", "elsevier")}
+        self.quota_remaining_vars = {publisher: tk.StringVar(value="—") for publisher in ("springer", "elsevier")}
+        self.quota_recovery_vars = {publisher: tk.StringVar(value="—") for publisher in ("springer", "elsevier")}
         self.counts_var = tk.StringVar(value="已下载 0    已存在 0    部分完成 0    无正文 0    访问受限 0    筛除 0    失败 0")
         self.detail_var = tk.StringVar(value="选择记录可查看 DOI、PII、链接和下载结果。")
         self._configure_styles()
         self._build_ui()
+        self._refresh_request_quotas()
         self._publisher_changed()
         if credential_warning:
             self._log(credential_warning)
@@ -152,6 +159,36 @@ class DownloaderApp(tk.Tk):
         self._poll_id = self.after(80, self._drain_events)
         if check_updates:
             self._startup_update_id = self.after(1200, self._auto_check_updates)
+
+    def _refresh_request_quotas(self) -> None:
+        if self._destroyed or self._closing:
+            return
+        if self._quota_poll_id is not None:
+            self.after_cancel(self._quota_poll_id)
+            self._quota_poll_id = None
+        try:
+            quotas = get_request_quotas()
+        except RequestQuotaError as exc:
+            self.quota_status_var.set(str(exc))
+            for publisher in self.quota_used_vars:
+                # Unknown usage must not look like an unused request budget.
+                self.quota_used_vars[publisher].set("读取失败")
+                self.quota_remaining_vars[publisher].set("—")
+                self.quota_recovery_vars[publisher].set("恢复时间未知")
+        else:
+            self.quota_status_var.set("本地 API 请求额度 · 北京时间 · 每 2 秒更新")
+            for publisher, quota in quotas.items():
+                self.quota_used_vars[publisher].set(f"{quota.used:,} / {quota.limit:,}")
+                self.quota_remaining_vars[publisher].set(f"{quota.remaining:,}")
+                if publisher == "springer":
+                    recovery = f"每日重置：{quota.next_recovery:%Y-%m-%d %H:%M:%S}"
+                elif quota.next_recovery is None:
+                    recovery = "暂无待恢复额度"
+                else:
+                    recovery = (f"下次恢复：{quota.next_recovery:%Y-%m-%d %H:%M:%S}\n"
+                                f"全部恢复：{quota.full_recovery:%Y-%m-%d %H:%M:%S}")
+                self.quota_recovery_vars[publisher].set(recovery)
+        self._quota_poll_id = self.after(2000, self._refresh_request_quotas)
 
     def _auto_check_updates(self) -> None:
         self._startup_update_id = None
@@ -250,24 +287,12 @@ class DownloaderApp(tk.Tk):
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
-        self._scroll_canvas = tk.Canvas(self, background="#f3f6fb", highlightthickness=0)
-        self._scroll_canvas.grid(row=0, column=0, sticky="nsew")
-        page_scroll = ttk.Scrollbar(self, orient="vertical", command=self._scroll_canvas.yview)
-        page_scroll.grid(row=0, column=1, sticky="ns")
-        self._scroll_canvas.configure(yscrollcommand=page_scroll.set)
-        self._content = ttk.Frame(self._scroll_canvas)
-        content_window = self._scroll_canvas.create_window((0, 0), window=self._content, anchor="nw")
+        self._content = ttk.Frame(self)
+        self._content.grid(row=0, column=0, sticky="nsew")
         self._content.grid_columnconfigure(0, weight=1)
-        self._content.grid_rowconfigure(3, weight=1, minsize=275)
-
-        def size_content(_event: object = None) -> None:
-            desired_height = max(self._scroll_canvas.winfo_height(), self._content.winfo_reqheight())
-            self._scroll_canvas.itemconfigure(content_window, width=self._scroll_canvas.winfo_width(), height=desired_height)
-            self._scroll_canvas.configure(scrollregion=(0, 0, self._scroll_canvas.winfo_width(), desired_height))
-
-        self._scroll_canvas.bind("<Configure>", size_content)
-        self._content.bind("<Configure>", size_content)
-        self.bind("<MouseWheel>", self._scroll_page)
+        # The list receives the window's remaining height; setup panels live
+        # in separate tabs instead of pushing the list off the screen.
+        self._content.grid_rowconfigure(2, weight=1)
         header = tk.Frame(self._content, background="#173f70", padx=22, pady=10)
         header.grid(row=0, column=0, sticky="ew")
         update_actions = tk.Frame(header, background="#173f70")
@@ -278,8 +303,55 @@ class DownloaderApp(tk.Tk):
         tk.Label(header, text="论文批量下载助手", foreground="white", background="#173f70", font=("Microsoft YaHei UI", 19, "bold")).pack(anchor="w")
         tk.Label(header, text="支持 Springer / Nature、Elsevier 与 Wiley 论文批量下载", foreground="#d6e4f7", background="#173f70", font=("Microsoft YaHei UI", 10)).pack(anchor="w", pady=(4, 0))
 
-        settings = ttk.Frame(self._content, style="Card.TFrame", padding=(18, 10))
-        settings.grid(row=1, column=0, sticky="ew", padx=18, pady=(10, 10))
+        notebook = ttk.Notebook(self._content)
+        notebook.grid(row=2, column=0, sticky="nsew", padx=12, pady=(4, 8))
+        self.notebook = notebook
+        self._settings_tab = ttk.Frame(notebook)
+        self._settings_tab.grid_rowconfigure(0, weight=1)
+        self._settings_tab.grid_columnconfigure(0, weight=1)
+        self._quota_tab = ttk.Frame(notebook)
+        self._quota_tab.grid_columnconfigure(0, weight=1)
+        self._details_tab = ttk.Frame(notebook)
+        self._details_tab.grid_rowconfigure(0, weight=1)
+        self._details_tab.grid_columnconfigure(0, weight=1)
+
+        # Only the settings page scrolls; the task toolbar and list stay visible.
+        self._scroll_canvas = tk.Canvas(self._settings_tab, background="#f3f6fb", highlightthickness=0)
+        self._scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        page_scroll = ttk.Scrollbar(self._settings_tab, orient="vertical", command=self._scroll_canvas.yview)
+        page_scroll.grid(row=0, column=1, sticky="ns")
+        self._scroll_canvas.configure(yscrollcommand=page_scroll.set)
+        self._settings_content = ttk.Frame(self._scroll_canvas)
+        self._settings_content.grid_columnconfigure(0, weight=1)
+        content_window = self._scroll_canvas.create_window((0, 0), window=self._settings_content, anchor="nw")
+
+        def size_settings(_event: object = None) -> None:
+            width = self._scroll_canvas.winfo_width()
+            height = max(self._scroll_canvas.winfo_height(), self._settings_content.winfo_reqheight())
+            self._scroll_canvas.itemconfigure(content_window, width=width, height=height)
+            self._scroll_canvas.configure(scrollregion=(0, 0, width, height))
+
+        self._scroll_canvas.bind("<Configure>", size_settings)
+        self._settings_content.bind("<Configure>", size_settings)
+        self.bind("<MouseWheel>", self._scroll_page)
+
+        self._quota_panel = ttk.Frame(self._quota_tab, style="Card.TFrame", padding=(18, 8))
+        self._quota_panel.grid(row=0, column=0, sticky="ew", padx=12, pady=12)
+        for column, minimum in ((0, 170), (1, 140), (2, 100)):
+            self._quota_panel.grid_columnconfigure(column, minsize=minimum)
+        self._quota_panel.grid_columnconfigure(3, weight=1)
+        ttk.Label(self._quota_panel, textvariable=self.quota_status_var, style="Muted.TLabel", wraplength=380).grid(row=0, column=0, columnspan=3, sticky="w")
+        self.quota_refresh_button = ttk.Button(self._quota_panel, text="刷新额度", command=self._refresh_request_quotas)
+        self.quota_refresh_button.grid(row=0, column=3, sticky="e")
+        for column, text in enumerate(("统计范围", "已用 / 上限（次）", "剩余（次）", "额度恢复时间（北京时间）")):
+            ttk.Label(self._quota_panel, text=text, style="Muted.TLabel").grid(row=1, column=column, sticky="w", pady=(3, 2))
+        for row, (publisher, text) in enumerate((("springer", "Springer Meta / OA · 当天"), ("elsevier", "Elsevier · 近 7 天")), 2):
+            ttk.Label(self._quota_panel, text=text, style="Card.TLabel").grid(row=row, column=0, sticky="w", pady=3)
+            for column, variables in ((1, self.quota_used_vars), (2, self.quota_remaining_vars), (3, self.quota_recovery_vars)):
+                ttk.Label(self._quota_panel, textvariable=variables[publisher], style="Card.TLabel").grid(row=row, column=column, sticky="w", pady=3)
+
+        settings = ttk.Frame(self._settings_content, style="Card.TFrame", padding=(18, 10))
+        settings.grid(row=0, column=0, sticky="ew", padx=12, pady=12)
         settings.grid_columnconfigure(1, weight=2)
         settings.grid_columnconfigure(3, weight=3)
         ttk.Label(settings, text="出版社", style="Card.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 12))
@@ -291,7 +363,7 @@ class DownloaderApp(tk.Tk):
         self.journal_combo.grid(row=0, column=3, columnspan=2, sticky="ew")
         self.journal_combo.bind("<KeyRelease>", self._filter_journals)
         self.journal_combo.bind("<FocusIn>", self._journal_focus)
-        ttk.Label(settings, textvariable=self.publisher_hint_var, style="Muted.TLabel").grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 10))
+        ttk.Label(settings, textvariable=self.publisher_hint_var, style="Muted.TLabel", wraplength=740).grid(row=1, column=0, columnspan=5, sticky="w", pady=(6, 10))
 
         ttk.Label(settings, text="文献文件", style="Card.TLabel").grid(row=2, column=0, sticky="w", padx=(0, 12))
         self.file_entry = ttk.Entry(settings, textvariable=self.file_var)
@@ -307,7 +379,7 @@ class DownloaderApp(tk.Tk):
         self.paste_button.grid(row=3, column=3, sticky="e", padx=(0, 8), pady=(8, 0))
         self.parse_button = ttk.Button(settings, text="解析文件", command=self._parse_file)
         self.parse_button.grid(row=3, column=4, sticky="ew", pady=(8, 0))
-        ttk.Label(settings, textvariable=self.parse_hint_var, style="Muted.TLabel").grid(row=4, column=0, columnspan=5, sticky="w", pady=(6, 10))
+        ttk.Label(settings, textvariable=self.parse_hint_var, style="Muted.TLabel", wraplength=740).grid(row=4, column=0, columnspan=5, sticky="w", pady=(6, 10))
 
         ttk.Label(settings, text="保存目录", style="Card.TLabel").grid(row=5, column=0, sticky="w")
         self.output_entry = ttk.Entry(settings, textvariable=self.output_var)
@@ -316,7 +388,7 @@ class DownloaderApp(tk.Tk):
         self.output_button.grid(row=5, column=4, sticky="ew")
         self.supplements_check = ttk.Checkbutton(settings, text="下载补充材料", variable=self.supplements_var, style="Card.TCheckbutton")
         self.supplements_check.grid(row=6, column=1, sticky="w", pady=(8, 0))
-        ttk.Label(settings, textvariable=self.access_hint_var, style="Muted.TLabel").grid(row=6, column=2, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(settings, textvariable=self.access_hint_var, style="Muted.TLabel", wraplength=400).grid(row=6, column=2, columnspan=2, sticky="w", pady=(8, 0))
         self.access_button = ttk.Button(settings, text="API / Cookie 设置", command=self._show_access_settings)
         self.access_button.grid(row=6, column=4, sticky="ew", pady=(8, 0))
         ttk.Label(settings, text="下载间隔（秒）", style="Card.TLabel").grid(row=7, column=0, sticky="w", padx=(0, 12), pady=(8, 0))
@@ -326,10 +398,12 @@ class DownloaderApp(tk.Tk):
 
         progress = ttk.Frame(self._content, padding=(18, 0))
         self._progress_panel = progress
-        progress.grid(row=2, column=0, sticky="ew")
+        progress.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         progress.grid_columnconfigure(0, weight=1)
         actions = ttk.Frame(progress)
         actions.grid(row=0, column=0, sticky="ew")
+        self.settings_button = ttk.Button(actions, text="导入 / 检索设置", command=lambda: self.notebook.select(self._settings_tab))
+        self.settings_button.pack(side="left", padx=(0, 8))
         self.start_button = ttk.Button(actions, text="开始下载", style="Primary.TButton", command=self._start_download)
         self.start_button.pack(side="left")
         self.cancel_button = ttk.Button(actions, text="取消任务", command=self._cancel_download, state="disabled")
@@ -343,15 +417,12 @@ class DownloaderApp(tk.Tk):
         self.progress_bar.grid(row=1, column=0, sticky="ew", pady=(10, 5))
         ttk.Label(progress, textvariable=self.counts_var, font=("Microsoft YaHei UI", 9)).grid(row=2, column=0, sticky="w", pady=(0, 7))
 
-        notebook = ttk.Notebook(self._content, height=235)
-        notebook.grid(row=3, column=0, sticky="nsew", padx=18, pady=(0, 10))
-        self.notebook = notebook
         results_tab = ttk.Frame(notebook, padding=(0, 5, 0, 0))
         results_tab.grid_columnconfigure(0, weight=1)
         results_tab.grid_rowconfigure(0, weight=1)
         notebook.add(results_tab, text="论文列表")
         columns = ("doi", "status", "supplements", "journal", "title", "file")
-        self.table = ttk.Treeview(results_tab, columns=columns, show="headings", selectmode="browse", height=8)
+        self.table = ttk.Treeview(results_tab, columns=columns, show="headings", selectmode="browse", height=14)
         widths = {"doi": 230, "status": 100, "supplements": 145, "journal": 200, "title": 330, "file": 250}
         for key, label in zip(columns, ("DOI / PII", "状态", "补充材料", "期刊", "论文标题", "保存文件 / 说明")):
             self.table.heading(key, text=label)
@@ -366,18 +437,20 @@ class DownloaderApp(tk.Tk):
             self.table.tag_configure(key, foreground=foreground)
         self.table.bind("<<TreeviewSelect>>", self._show_result_details)
         self.table.bind("<Double-1>", self._open_selected_pdf)
-        detail_frame = ttk.Frame(results_tab, padding=(8, 5))
-        detail_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        detail_frame = ttk.Frame(self._details_tab, padding=(12, 10))
+        detail_frame.grid(row=0, column=0, sticky="nsew")
+        detail_frame.grid_rowconfigure(0, weight=1)
         detail_frame.grid_columnconfigure(0, weight=1)
-        self._detail_text = tk.Text(detail_frame, height=3, wrap="word", state="disabled", background="#f3f6fb", foreground="#33465e", relief="flat", font=("Microsoft YaHei UI", 9))
-        self._detail_text.grid(row=0, column=0, sticky="ew")
+        self._detail_text = tk.Text(detail_frame, height=8, wrap="word", state="disabled", background="#f3f6fb", foreground="#33465e", relief="flat", font=("Microsoft YaHei UI", 9))
+        self._detail_text.grid(row=0, column=0, sticky="nsew")
         detail_scroll = ttk.Scrollbar(detail_frame, orient="vertical", command=self._detail_text.yview)
         detail_scroll.grid(row=0, column=1, sticky="ns")
         self._detail_text.configure(yscrollcommand=detail_scroll.set)
         self.detail_var.trace_add("write", self._refresh_detail_text)
         self._refresh_detail_text()
         result_actions = ttk.Frame(results_tab)
-        result_actions.grid(row=3, column=0, columnspan=2, sticky="ew")
+        result_actions.grid(row=2, column=0, columnspan=2, sticky="ew")
+        ttk.Button(result_actions, text="查看详情", command=lambda: self.notebook.select(self._details_tab)).pack(side="left", padx=(8, 0), pady=(0, 5))
         self.record_button = ttk.Button(result_actions, text="打开论文记录 JSON", command=self._open_selected_record, state="disabled")
         self.record_button.pack(side="left", padx=(8, 5), pady=(0, 5))
         self.paper_folder_button = ttk.Button(result_actions, text="打开论文文件夹", command=self._open_selected_folder, state="disabled")
@@ -395,7 +468,10 @@ class DownloaderApp(tk.Tk):
         log_scroll = ttk.Scrollbar(log_tab, orient="vertical", command=self.log_text.yview)
         log_scroll.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=log_scroll.set)
-        ttk.Label(self._content, textvariable=self.status_var, padding=(20, 0, 20, 9), font=("Microsoft YaHei UI", 9)).grid(row=4, column=0, sticky="ew")
+        notebook.add(self._settings_tab, text="导入与下载设置")
+        notebook.add(self._quota_tab, text="API 请求额度")
+        notebook.add(self._details_tab, text="文献详情")
+        ttk.Label(self._content, textvariable=self.status_var, padding=(16, 0, 16, 7), font=("Microsoft YaHei UI", 9)).grid(row=3, column=0, sticky="ew")
         self._editable_widgets = [self.file_entry, self.column_entry, self.output_entry, self.file_button, self.output_button, self.access_button, self.supplements_check, self.interval_combo, self.parse_button, self.paste_button, self.search_button]
 
     def _selected_publisher(self) -> Publisher:
@@ -404,15 +480,15 @@ class DownloaderApp(tk.Tk):
     def _scroll_page(self, event: tk.Event) -> str | None:
         if event.widget.winfo_class() in {"Text", "Treeview", "TCombobox"}:
             return None
-        if self._content.winfo_height() > self._scroll_canvas.winfo_height() and event.delta:
+        if (self.notebook.select() == str(self._settings_tab)
+                and self._settings_content.winfo_height() > self._scroll_canvas.winfo_height() and event.delta):
             self._scroll_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
             return "break"
         return None
 
     def _show_progress_panel(self) -> None:
+        self.notebook.select(0)
         self.update_idletasks()
-        if self._content.winfo_height() > self._scroll_canvas.winfo_height():
-            self._scroll_canvas.yview_moveto(max(0, self._progress_panel.winfo_y() - 12) / self._content.winfo_height())
 
     def _publisher_changed(self, _event: object = None) -> None:
         publisher = self._selected_publisher()
@@ -569,6 +645,13 @@ class DownloaderApp(tk.Tk):
     def _start_search(self, dialog: _KeywordSearchDialog, config: SearchConfig) -> None:
         if self._busy or self._closing or dialog is not self._search_dialog:
             return
+        skip_downloaded = config.publisher_id == "elsevier" and dialog.skip_downloaded_var.get()
+        raw_output = self.output_var.get().strip().strip('"')
+        if skip_downloaded and not raw_output:
+            messagebox.showerror("请选择保存目录", "请先选择原下载目录，再使用跳过已完成文献。", parent=dialog)
+            return
+        output_dir = Path(raw_output).expanduser()
+        include_supplements = self.supplements_var.get()
         token = object()
         self._search_token = token
         self._cancel.clear()
@@ -580,6 +663,18 @@ class DownloaderApp(tk.Tk):
             result, error = None, ""
             try:
                 result = search_articles(config, on_log=lambda line: self._events.put(("search_log", token, line)), cancel_event=self._cancel)
+                if skip_downloaded and result.records:
+                    self._events.put(("search_log", token, "正在按原保存目录检查已完成的文献…"))
+                    try:
+                        result.records, result.skipped_downloaded = exclude_downloaded_references(
+                            result.records, output_dir, include_supplements=include_supplements, cancel_event=self._cancel)
+                    except DownloadCancelled:
+                        # No unchecked rows are silently lost: retry this batch
+                        # from its original position after cancelling the scan.
+                        result.records = []
+                        result.cancelled = result.truncated = True
+                        result.next_cursor = config.start_offset
+                        result.warnings.append("已取消本地文件检查；可从本批起始位置重试，原列表已保留。")
             except Exception as exc:
                 error = str(exc)
                 for secret in (config.api_key, config.insttoken):
@@ -961,6 +1056,8 @@ class DownloaderApp(tk.Tk):
 
     def _set_busy(self, value: bool, downloading: bool = False) -> None:
         self._busy = value
+        if not value:
+            self._refresh_request_quotas()
         for widget in self._editable_widgets:
             widget.configure(state="disabled" if value else "normal")
         self.publisher_combo.configure(state="disabled" if value else "readonly")
@@ -1095,7 +1192,10 @@ class DownloaderApp(tk.Tk):
         supplements_text = self._supplements_text(result)
         reference = self._references.get(key)
         identifier = result.doi or (f"PII: {result.pii}" if result.pii else (f"PII: {reference.pii}" if reference and reference.pii else key))
-        values = (identifier, STATUS_LABELS.get(result.status, result.status), supplements_text, result.journal or (reference.journal if reference else ""), result.title or (reference.title if reference else ""), result.error or result.file_path)
+        status_label = STATUS_LABELS.get(result.status, result.status)
+        if Path(result.file_path).suffix.lower() == ".xml":
+            status_label += "（XML）"
+        values = (identifier, status_label, supplements_text, result.journal or (reference.journal if reference else ""), result.title or (reference.title if reference else ""), result.error or result.file_path)
         if row_id:
             self.table.item(row_id, values=values, tags=(result.status,))
             self.table.see(row_id)
@@ -1155,6 +1255,7 @@ class DownloaderApp(tk.Tk):
 
     def _populate_table(self, references: list[ArticleReference]) -> None:
         self._clear_table()
+        self.notebook.select(0)
         for reference in references:
             key = reference.key
             self._references[key] = reference
@@ -1190,7 +1291,8 @@ class DownloaderApp(tk.Tk):
             if result.error:
                 parts.append(f"说明：{result.error}")
             if result.file_path:
-                parts.append(f"正文：{result.file_path}")
+                label = "完整 XML 正文（PDF 仅提供首页）" if Path(result.file_path).suffix.lower() == ".xml" else "正文"
+                parts.append(f"{label}：{result.file_path}")
             self.record_button.configure(state="normal" if result.record_path else "disabled")
             self.paper_folder_button.configure(state="normal" if result.record_path or result.file_path else "disabled")
         else:
@@ -1344,6 +1446,9 @@ class DownloaderApp(tk.Tk):
         self._destroyed = True
         self._cancel.set()
         self._pending_update = None
+        if self._quota_poll_id is not None:
+            self.after_cancel(self._quota_poll_id)
+            self._quota_poll_id = None
         if self._startup_update_id is not None:
             try:
                 self.after_cancel(self._startup_update_id)
@@ -1388,6 +1493,10 @@ class _KeywordSearchDialog(tk.Toplevel):
         self.year_from_var = tk.StringVar(value=defaults.get("year_from", ""))
         self.year_to_var = tk.StringVar(value=defaults.get("year_to", ""))
         self.max_results_var = tk.StringVar(value=defaults.get("max_results", "100"))
+        same_source = defaults.get("publisher_id") == publisher.id and defaults.get("journal") == journal
+        self.start_position_var = tk.StringVar(value=defaults.get("start_position", "1") if same_source else "1")
+        self.skip_downloaded_var = tk.BooleanVar(value=defaults.get("skip_downloaded", "true") != "false")
+        self._next_cursor = int(defaults["next_position"]) - 1 if same_source and defaults.get("next_position") else None
         ttk.Label(form, text="关键词").grid(row=1, column=0, sticky="w", padx=(0, 10))
         keyword_entry = ttk.Entry(form, textvariable=self.keywords_var)
         keyword_entry.grid(row=1, column=1, columnspan=5, sticky="ew")
@@ -1406,7 +1515,17 @@ class _KeywordSearchDialog(tk.Toplevel):
         ttk.Label(form, text="篇（1–1000）").grid(row=2, column=4, sticky="w", padx=6, pady=(10, 0))
         self.search_button = ttk.Button(form, text="开始检索", command=self.start, style="Primary.TButton")
         self.search_button.grid(row=2, column=5, sticky="e", pady=(10, 0))
-        self._inputs = (keyword_entry, year_from_entry, year_to_entry, max_entry)
+        ttk.Label(form, text="起始序号").grid(row=3, column=0, sticky="w", pady=(10, 0))
+        self.start_position_entry = ttk.Entry(form, textvariable=self.start_position_var, width=8)
+        self.start_position_entry.grid(row=3, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(form, text="从第几条开始（1–6000）").grid(row=3, column=2, columnspan=3, sticky="w", padx=10, pady=(10, 0))
+        self.continue_button = ttk.Button(form, text="继续检索下一批", command=self.continue_search, state="disabled")
+        self.continue_button.grid(row=3, column=5, sticky="e", pady=(10, 0))
+        self.skip_downloaded_check = ttk.Checkbutton(form, text="Elsevier：跳过保存目录中已完成的文献（PDF / XML）", variable=self.skip_downloaded_var)
+        self.skip_downloaded_check.grid(row=4, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        if publisher.id != "elsevier":
+            self.skip_downloaded_check.configure(state="disabled")
+        self._inputs = (keyword_entry, year_from_entry, year_to_entry, max_entry, self.start_position_entry, self.skip_downloaded_check)
         self.status_var = tk.StringVar(value="检索仅获取文献列表；导入选中记录后，回主界面点击“开始下载”。")
         ttk.Label(self, textvariable=self.status_var, wraplength=900, padding=(16, 0, 16, 10)).grid(row=1, column=0, sticky="ew")
         self.bind("<Configure>", lambda event: self._resize_hint(event))
@@ -1448,9 +1567,12 @@ class _KeywordSearchDialog(tk.Toplevel):
         self.cancel_button = ttk.Button(actions, text="取消检索", command=self.cancel, state="disabled")
         self.cancel_button.pack(side="right", padx=6)
         ttk.Button(actions, text="关闭", command=self.close).pack(side="right")
-        for variable in (self.keywords_var, self.year_from_var, self.year_to_var, self.max_results_var):
+        for variable in (self.keywords_var, self.year_from_var, self.year_to_var, self.max_results_var, self.start_position_var, self.skip_downloaded_var):
             variable.trace_add("write", self._query_changed)
         self.journal_filter_var.trace_add("write", self._apply_journal_filter)
+        self._update_continue_state()
+        if self._next_cursor is not None:
+            self.status_var.set(f"已保留上批位置；点击“继续检索下一批”将从第 {self._next_cursor + 1} 条开始。")
         self.grab_set()
         keyword_entry.focus_set()
 
@@ -1462,6 +1584,9 @@ class _KeywordSearchDialog(tk.Toplevel):
 
     def _query_changed(self, *_args: object) -> None:
         if not self.running:
+            self._next_cursor = None
+            self.app._search_defaults.pop("next_position", None)
+            self._update_continue_state()
             self._clear_results()
             self.status_var.set("检索条件已更改，请点击“开始检索”。")
 
@@ -1522,13 +1647,26 @@ class _KeywordSearchDialog(tk.Toplevel):
         self.selection_var.set(f"已选 {count} 篇")
         self.import_button.configure(state="normal" if count and not self.running else "disabled")
 
+    def _update_continue_state(self) -> None:
+        self.continue_button.configure(state="normal" if self._next_cursor is not None and not self.running else "disabled")
+
+    def continue_search(self) -> None:
+        if self.running or self._next_cursor is None:
+            return
+        position = self._next_cursor + 1
+        self.start_position_var.set(str(position))
+        self.start()
+
     def set_running(self, value: bool) -> None:
         self.running = value
         for widget in (*self._inputs, self.search_button, self.select_all_button, self.deselect_button):
             widget.configure(state="disabled" if value else "normal")
         self.journal_filter_combo.configure(state="readonly" if self._all_records and not value else "disabled")
         self.cancel_button.configure(state="normal" if value else "disabled")
+        if self.publisher.id != "elsevier":
+            self.skip_downloaded_check.configure(state="disabled")
         self._selection_changed()
+        self._update_continue_state()
         if value:
             self.status_var.set("正在检索；可以取消并保留已找到的记录。")
 
@@ -1539,30 +1677,46 @@ class _KeywordSearchDialog(tk.Toplevel):
             year_from = int(self.year_from_var.get()) if self.year_from_var.get().strip() else None
             year_to = int(self.year_to_var.get()) if self.year_to_var.get().strip() else None
             maximum = int(self.max_results_var.get())
+            start_position = int(self.start_position_var.get())
         except ValueError:
-            messagebox.showerror("检索条件无效", "年份和获取篇数应为整数；年份可留空。", parent=self)
+            messagebox.showerror("检索条件无效", "年份、获取篇数和起始序号应为整数；年份可留空。", parent=self)
             return
         try:
             interval = parse_wiley_interval(self.app.interval_var.get()) if self.publisher.id == "wiley" else parse_request_interval(self.app.interval_var.get())
             key = self.app.springer_meta_key_var.get().strip() if self.publisher.id == "springer" else self.app.api_key_var.get().strip() if self.publisher.id == "elsevier" else ""
-            config = SearchConfig(publisher_id=self.publisher.id, keywords=self.keywords_var.get().strip(), journal=self.journal, year_from=year_from, year_to=year_to, max_results=maximum, interval=interval, api_key=key, insttoken=self.app.insttoken_var.get().strip() if self.publisher.id == "elsevier" else "")
+            config = SearchConfig(publisher_id=self.publisher.id, keywords=self.keywords_var.get().strip(), journal=self.journal, year_from=year_from, year_to=year_to, max_results=maximum, start_offset=start_position - 1, interval=interval, api_key=key, insttoken=self.app.insttoken_var.get().strip() if self.publisher.id == "elsevier" else "")
             validate_search_config(config)
         except ValueError as exc:
             messagebox.showerror("检索条件无效", self.app._redact_secrets(str(exc)), parent=self)
             return
-        self.app._search_defaults = {"keywords": self.keywords_var.get(), "year_from": self.year_from_var.get(), "year_to": self.year_to_var.get(), "max_results": self.max_results_var.get()}
+        self.app._search_defaults = {"keywords": self.keywords_var.get(), "year_from": self.year_from_var.get(),
+            "year_to": self.year_to_var.get(), "max_results": self.max_results_var.get(),
+            "start_position": self.start_position_var.get(), "publisher_id": self.publisher.id, "journal": self.journal,
+            "skip_downloaded": "true" if self.skip_downloaded_var.get() else "false"}
+        self._next_cursor = None
+        self._update_continue_state()
         self._clear_results()
         self.app._start_search(self, config)
 
     def show_result(self, result: SearchResult) -> None:
         self._clear_results()
         self._all_records = list(result.records)
+        self._next_cursor = result.next_cursor
+        if self._next_cursor is not None:
+            self.app._search_defaults["next_position"] = str(self._next_cursor + 1)
+        else:
+            self.app._search_defaults.pop("next_position", None)
+        self._update_continue_state()
         self._rebuild_journal_filters()
         total = f"，来源报告共 {result.total} 条" if result.total is not None else ""
         summary = f"{'检索已取消' if result.cancelled else '检索完成'}：获取 {len(result.records)} 条{total}。"
         if result.source:
             summary += f" 来源：{result.source}。"
-        if result.truncated:
+        if result.skipped_downloaded:
+            summary += f" 已跳过原保存目录中 {result.skipped_downloaded} 条已完成文献。"
+        if self._next_cursor is not None:
+            summary += f" 尚有结果未获取，下一批从第 {self._next_cursor + 1} 条开始。"
+        elif result.truncated:
             summary += " 尚有结果未获取，可收窄关键词、期刊或年份范围。"
         if result.warnings:
             summary += " " + "；".join(result.warnings[:3])

@@ -1,5 +1,6 @@
 """Publisher downloads ignore environment proxies while preserving TLS checks."""
 import io
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -11,6 +12,10 @@ from paper_downloader import downloader, elsevier, wiley
 
 
 class DirectDownloadNetworkTests(unittest.TestCase):
+    def setUp(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch("paper_downloader.request_quota.settings_path", return_value=Path(directory) / "settings.json"))
+
     def test_metadata_main_and_supplements_bypass_environment_proxies(self):
         cases = [
             (downloader, downloader.DownloadConfig("", Path(".")), [

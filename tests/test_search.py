@@ -4,6 +4,8 @@ from __future__ import annotations
 import io
 import json
 import os
+from pathlib import Path
+import tempfile
 from email.message import Message
 import threading
 from types import SimpleNamespace
@@ -97,6 +99,8 @@ class FakeSession(requests.Session):
 
 class SearchTests(unittest.TestCase):
     def setUp(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        self.enterContext(patch("paper_downloader.request_quota.settings_path", return_value=Path(directory) / "settings.json"))
         self.config = search.SearchConfig("springer", "oxygen evolution", api_key=TOKEN, retries=0)
         self.now, self.waits = 0.0, []
         self.enterContext(patch.object(search.time, "monotonic", side_effect=lambda: self.now))
@@ -168,6 +172,24 @@ class SearchTests(unittest.TestCase):
                         search.search_articles(self.config)
                 self.assertFalse(session.trust_env)
                 self.assertEqual(dict(session.calls[0][1]["proxies"]), {})
+
+    def test_only_explicit_springer_no_match_404_is_an_empty_result(self):
+        no_match = json.dumps({
+            "status": "Fail", "message": "No data was found for the given query.",
+            "error": {"error": "Not Found", "error_description": "No matching data is available for the requested query."}
+        }).encode()
+        result, session = self.run_fake([response(no_match, status=404)])
+        self.assertEqual((result.records, result.total, result.truncated), ([], 0, False))
+        self.assertEqual(len(session.calls), 1)
+
+        for publisher, status, body in (
+                ("springer", 404, b'{"status":"Fail","message":"Unknown route"}'),
+                ("springer", 404, b"Not found"), ("springer", 403, no_match),
+                ("elsevier", 404, no_match), ("wiley", 404, no_match)):
+            with self.subTest(publisher=publisher, status=status, body=body):
+                self.config.publisher_id = publisher
+                with self.assertRaises(search.SearchError):
+                    self.run_fake([response(body, status=status)])
 
     def test_springer_pagination_dedup_and_rate_limit(self):
         result, session = self.run_fake([

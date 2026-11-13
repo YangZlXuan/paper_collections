@@ -27,7 +27,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--journal", default="", help="完整期刊名；留空检索该出版社全部期刊")
     parser.add_argument("--year-from", type=int)
     parser.add_argument("--year-to", type=int)
-    parser.add_argument("--max-results", type=int, default=100, help="最多保留 1–1000 条文献，默认 100")
+    parser.add_argument("--max-results", type=int, default=100, help="本批最多保留 1–1000 条文献，默认 100")
+    parser.add_argument("--start-position", type=int, default=1, help="从第几条检索结果开始，1–6000；下一批可从 1001 开始")
     parser.add_argument("--interval", help="请求间隔；默认 Springer/Elsevier 2 秒、Wiley 10 秒")
     parser.add_argument("--results", type=Path, required=True, help="导出 DOI/PII/标题/期刊 CSV 路径，不能覆盖已有文件")
     parser.add_argument("--download", action="store_true", help="检索后下载全部返回结果；默认仅导出清单")
@@ -44,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
                        load_elsevier_credentials() if args.publisher == "elsevier" else {})
         config = SearchConfig(publisher_id=args.publisher, keywords=args.keywords.strip(),
                               journal=args.journal.strip(), year_from=args.year_from, year_to=args.year_to,
-                              max_results=args.max_results, interval=interval,
+                              max_results=args.max_results, interval=interval, start_offset=args.start_position - 1,
                               api_key=credentials.get("api_key", ""), insttoken=credentials.get("insttoken", ""))
         validate_search_config(config)
         if args.results.exists():
@@ -83,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
             print(warning)
         if found.truncated:
             print("本次结果有数量或分页限制，不代表全部命中文献。")
+        if found.next_cursor is not None:
+            print(f"继续检索请指定 --start-position {found.next_cursor + 1}。")
         if found.cancelled or cancel.is_set():
             print("检索已取消；已获得的记录已导出，未开始下载。")
             return 130
