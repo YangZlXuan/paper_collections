@@ -532,7 +532,7 @@ class DownloaderApp(tk.Tk):
         self.journal_var.set(ALL_JOURNALS)
         self.journal_combo.configure(values=[ALL_JOURNALS, *publisher.journals])
         if publisher.id == "wiley" and publisher.enabled:
-            self.publisher_hint_var.set(f"已收录 {len(publisher.journals)} 本期刊。正文 API 下载，Crossref 辅助寻找补充材料；未检索到记录不代表论文无 SI。")
+            self.publisher_hint_var.set(f"已收录 {len(publisher.journals)} 本期刊。ANIE 数字 DOI 按文件名下载 SI，其他 DOI 通过 Crossref 查找附件。")
             self.access_hint_var.set("WileyKey 自动读取，请求间隔至少 10 秒")
         elif publisher.id == "elsevier" and publisher.enabled:
             self.publisher_hint_var.set(f"已收录 {len(publisher.journals)} 本期刊。支持 DOI / PII 下载，自动读取 ElsevierKey；PDF 可用性取决于访问权限。")
@@ -1234,6 +1234,8 @@ class DownloaderApp(tk.Tk):
             return "未启用"
         if status == "unsupported":
             return "接口不支持"
+        if status == "incomplete":
+            return "si下载未完成"
         if status == "not_indexed":
             return "未检索到SI记录"
         if status == "manual_required":

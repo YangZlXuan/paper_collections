@@ -1,8 +1,4 @@
-"""Discover Wiley supplements from explicit Crossref associations, never page crawling.
-
-Crossref's UNIXSD transform exposes deposited component_list entries that are
-often absent from its REST JSON. A missing component is not evidence of no SI.
-"""
+"""Download Wiley SI using ANIE filenames or explicit Crossref associations."""
 from __future__ import annotations
 
 import hashlib
@@ -261,9 +257,25 @@ def _points_to_parent(core: dict, parent: str, kind: str) -> bool:
         and extract_dois(str(item.get("id", ""))) == [parent] for item in targets)
 
 
-def discover(client: wl._Client, doi: str, core: dict) -> tuple[list[dict], dict]:
+def discover(client: wl._Client, doi: str, core: dict) -> tuple[list[list[dict]], dict]:
+    """Return one group per attachment, with alternative URLs in download order."""
     if not wl._is_wiley(core) or str(core.get("DOI", "")).casefold() != doi.casefold():
         raise ValueError("附件查询缺少已核验的 Wiley 父论文元数据。")
+    anie = re.fullmatch(r"10\.1002/anie\.([0-9]+)", doi, re.I)
+    if anie:
+        number = anie[1]
+        filenames = (f"anie{number}-sup-0001-misc_information.pdf",
+                     f"anie_{number}_sm_miscellaneous_information.pdf")
+        endpoint = "https://onlinelibrary.wiley.com/action/downloadSupplement"
+        urls = [endpoint + "?" + urlencode({"doi": doi, "file": name}) for name in filenames]
+        item = {"parent_doi": doi, "title": "Supporting Information", "mimetype": "application/pdf",
+                "source": "Wiley ANIE filenames", "urls": urls}
+        candidates = _descriptors(item, wl._metadata_endpoint(doi), client.config)
+        return [candidates], {"source": item["source"], "parent_doi": doi, "status": "complete",
+                              "selected_total": 1, "errors": [],
+                              "candidates": [{k: v for k, v in candidate.items() if k != "request_url"}
+                                             for candidate in candidates]}
+
     discovery = {"source": "Crossref REST + UNIXSD", "url": metadata_url(doi), "parent_doi": doi,
                  "status": "complete", "components_total": 0, "selected_total": 0, "errors": [], "sources": []}
     descriptors = []
@@ -353,7 +365,7 @@ def discover(client: wl._Client, doi: str, core: dict) -> tuple[list[dict], dict
     elif not descriptors:
         discovery["status"] = "not_indexed"
     discovery["candidates"] = [{key: value for key, value in item.items() if key != "request_url"} for item in descriptors]
-    return descriptors, discovery
+    return [[item] for item in descriptors], discovery
 
 
 def _validate(path: Path, suffix: str, prefix: bytes, client: wl._Client) -> None:
@@ -440,3 +452,23 @@ def reuse(client: wl._Client, descriptor: dict, target: Path, previous: dict) ->
         return None
     return {key: value for key, value in descriptor.items() if key != "request_url"} | {
         "status": "exists", "bytes": size, "sha256": digest, "final_url": wl._public_url(previous.get("final_url", ""))}
+
+
+def fetch_attachment(client: wl._Client, candidates: list[dict], directory: Path, old_assets: dict) -> dict:
+    # A previous run may already have saved the PDF under its older Wiley name.
+    for item in candidates:
+        asset = reuse(client, item, directory / item["file"], old_assets.get(item["asset_key"], {}))
+        if asset is not None:
+            return asset
+
+    errors = []
+    for item in candidates:
+        try:
+            return download(client, item, directory / item["file"])
+        except (DownloadCancelled, wl._BatchStopped):
+            raise
+        except (AccessDenied, ValueError, OSError, requests.RequestException) as exc:
+            if len(candidates) == 1:
+                raise
+            errors.append(f"第 {len(errors) + 1} 个文件名：{wl._safe_error(exc, client.config)}")
+    raise ValueError("；".join(errors))

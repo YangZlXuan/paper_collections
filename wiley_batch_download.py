@@ -1,4 +1,4 @@
-"""Download Wiley PDFs via TDM and discover SI through Crossref metadata."""
+"""Download Wiley articles via TDM and SI via ANIE filenames or Crossref metadata."""
 from __future__ import annotations
 
 import argparse
@@ -12,13 +12,13 @@ from paper_downloader.wiley import WileyConfig, parse_wiley_interval, run_wiley_
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Wiley API 正文下载，Crossref 辅助发现和下载 SI")
+    parser = argparse.ArgumentParser(description="下载 Wiley 正文和 SI。ANIE 数字 DOI 按文件名下载 SI，其他 DOI 通过 Crossref 查找附件。")
     parser.add_argument("--input", type=Path, required=True, help="TXT / CSV / TSV / XLSX / RIS / BibTeX 文献文件")
     parser.add_argument("--output", type=Path, required=True, help="下载保存目录")
     parser.add_argument("--column", help="表格中的自定义 DOI 列名")
     parser.add_argument("--journal", default="", help="完整期刊名；留空处理全部 Wiley 期刊")
     parser.add_argument("--interval", default="10", help="请求间隔，10–60 秒，可输入小数")
-    parser.add_argument("--no-supplements", action="store_true", help="仅下载正文，关闭 Crossref SI 查询")
+    parser.add_argument("--no-supplements", action="store_true", help="仅下载正文，跳过 SI")
     args = parser.parse_args(argv)
     try:
         config = WileyConfig(email="", output_dir=args.output, journal=args.journal.strip(),
@@ -37,8 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     for warning in parsed.warnings:
         print(warning)
     print(f"已导入 {len(parsed.records)} 条文献，将处理 {len(records)} 条；"
-          f"请求间隔 {config.interval:g} 秒。正文通过 Wiley TDM API，"
-          + ("SI 通过 Crossref 辅助查找；未检索到记录不代表没有附件。" if config.include_supplements else "SI 查询已关闭。"))
+          f"请求间隔 {config.interval:g} 秒。正文通过 Wiley TDM API 下载。"
+          + ("ANIE 数字 DOI 按文件名下载 SI，其他 DOI 通过 Crossref 查找附件。" if config.include_supplements else "SI 下载已关闭。"))
     cancel = threading.Event()
     previous = signal.getsignal(signal.SIGINT)
     signal.signal(signal.SIGINT, lambda _signum, _frame: cancel.set())

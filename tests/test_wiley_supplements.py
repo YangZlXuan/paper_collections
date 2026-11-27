@@ -21,6 +21,10 @@ from test_wiley import DOI, TOKEN, REFERENCE, ENDPOINT, META, PDF, CDN, FakeSess
 XML_URL = si.metadata_url(DOI)
 REVERSE_URL = si.relations_url(DOI)
 SI_URL = f"https://onlinelibrary.wiley.com/doi/suppl/{DOI}/supinfo/research-sup-0001.docx"
+ANIE_DOI = "10.1002/anie.201406455"
+ANIE_SI = "https://onlinelibrary.wiley.com/action/downloadSupplement?doi=10.1002%2Fanie.201406455&file="
+ANIE_MODERN = ANIE_SI + "anie201406455-sup-0001-misc_information.pdf"
+ANIE_LEGACY = ANIE_SI + "anie_201406455_sm_miscellaneous_information.pdf"
 
 
 def docx():
@@ -99,6 +103,59 @@ class WileySupplementTests(unittest.TestCase):
 
     def record(self, summary):
         return json.loads(Path(summary.results[0].record_path).read_text(encoding="utf-8"))
+
+    def run_anie(self, file_routes):
+        reference = ArticleReference(doi=ANIE_DOI)
+        routes = {
+            wl._metadata_endpoint(ANIE_DOI): [metadata(doi=ANIE_DOI, journal="Angewandte Chemie International Edition")],
+            wl._endpoint(reference): [response(PDF)],
+            **file_routes,
+        }
+        summary, session = self.run_fake(routes, [reference])
+        urls = [req.url for req, _ in session.calls if urlsplit(req.url).path == "/action/downloadSupplement"]
+        return summary, urls
+
+    def test_anie_first_valid_pdf_stops_after_modern_filename(self):
+        summary, urls = self.run_anie({ANIE_MODERN: [response(PDF)]})
+        result = summary.results[0]
+        self.assertEqual(urls, [ANIE_MODERN])
+        self.assertEqual((result.supplements_status, result.supplements_downloaded), ("complete", 1))
+        asset, = self.record(summary)["supplements"]
+        self.assertEqual((Path(result.record_path).parent / asset["file"]).read_bytes(), PDF)
+
+    def test_anie_invalid_first_response_falls_back_to_legacy_filename(self):
+        summary, urls = self.run_anie({
+            ANIE_MODERN: [response(b"<html>Login</html>", content_type="text/html")],
+            ANIE_LEGACY: [response(PDF)],
+        })
+        result = summary.results[0]
+        self.assertEqual(urls, [ANIE_MODERN, ANIE_LEGACY])
+        self.assertEqual((result.status, result.supplements_total, result.supplements_failed), ("success", 1, 0))
+        asset, = self.record(summary)["supplements"]
+        self.assertEqual(asset["url"], ANIE_LEGACY)
+        self.assertEqual((Path(result.record_path).parent / asset["file"]).read_bytes(), PDF)
+        resumed, urls = self.run_anie({})
+        self.assertEqual(urls, [])
+        self.assertEqual((resumed.results[0].status, resumed.results[0].supplements_existing), ("exists", 1))
+
+    def test_anie_both_filenames_fail_reports_si_incomplete_and_keeps_article(self):
+        summary, urls = self.run_anie({
+            ANIE_MODERN: [response(status=404)],
+            ANIE_LEGACY: [response(b"truncated PDF")],
+        })
+        result = summary.results[0]
+        self.assertEqual(urls, [ANIE_MODERN, ANIE_LEGACY])
+        self.assertEqual((result.status, result.supplements_downloaded, result.supplements_failed), ("partial", 0, 1))
+        self.assertEqual(result.supplements_status, "incomplete")
+        self.assertIn("si下载未完成", result.error)
+        self.assertEqual(Path(result.file_path).read_bytes(), PDF)
+        self.assertFalse(list(self.output.rglob("*.part")))
+
+    def test_anie_rate_limit_stops_before_legacy_filename(self):
+        summary, urls = self.run_anie({ANIE_MODERN: [response(status=429, headers={"Retry-After": "120"})]})
+        self.assertEqual(urls, [ANIE_MODERN])
+        self.assertTrue(summary.stop_reason)
+        self.assertTrue(Path(summary.results[0].file_path).exists())
 
     def test_xml_si_docx_download_preserves_pdf_and_uses_no_token(self):
         routes = self.base([component()])

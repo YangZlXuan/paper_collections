@@ -880,7 +880,7 @@ class GuiWorkflowTests(unittest.TestCase):
         self.assertEqual(self.saved.call_args.args[0]["wiley_include_supplements"], "false")
         self.assertEqual(self.app.table.item(self.app._row_ids["10.1002/test-a"], "values")[2], "未启用")
 
-    def test_wiley_crossref_states_keep_manual_clues_and_article_action(self):
+    def test_wiley_si_states_keep_manual_clues_and_article_action(self):
         self.select_wiley()
         self.import_text("10.1002/test-a")
         doi = self.app._parsed.dois[0]
@@ -889,7 +889,8 @@ class GuiWorkflowTests(unittest.TestCase):
         record_path = self.folder / "wiley-manifest.json"
         record_path.write_text("{}", encoding="utf-8")
         article_url = "https://onlinelibrary.wiley.com/doi/10.1002/test-a"
-        for status, expected in (("not_indexed", "未检索到SI记录"), ("manual_required", "需手动获取"), ("discovery_failed", "发现失败")):
+        for status, expected in (("not_indexed", "未检索到SI记录"), ("manual_required", "需手动获取"),
+                                 ("discovery_failed", "发现失败"), ("incomplete", "si下载未完成")):
             with self.subTest(status=status):
                 result = DownloadResult(doi, "partial", reference_key=doi, supplements_status=status,
                     article_url=article_url, record_path=str(record_path), error="请查看文章页面或 JSON 中的附件线索")

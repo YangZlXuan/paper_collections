@@ -113,7 +113,7 @@ def self_test(destination: Path) -> None:
         "download_mode": "publisher_pages_elsevier_api_wiley_tdm",
         "wiley_pdf_supported": True,
         "wiley_tdm_supplements_supported": False,
-        "wiley_supplements_source": "Crossref metadata",
+        "wiley_supplements_source": "Wiley filename patterns for numeric 10.1002/anie DOIs, Crossref metadata for other DOIs",
         "wiley_crossref_parser": True,
         "wiley_supplements_default": wiley_config.include_supplements,
         "wiley_minimum_request_interval_seconds": MIN_WILEY_INTERVAL,

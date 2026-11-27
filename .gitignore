@@ -28,10 +28,16 @@ cookies*.json
 Cookies/
 Cookies*.txt
 Cookies*.json
+_cf_cookies*.json
+*cf_session*.json
+wiley_cf_session.json
+si_session.json
 
 # Private research inputs and generated download records
 private/
 local-data/
+/outputs/
+/anie*_SI_*.pdf
 manifest.json
 manifest_*.csv
 parsed_references.csv

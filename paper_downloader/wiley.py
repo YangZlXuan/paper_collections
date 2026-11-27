@@ -1,7 +1,7 @@
 """Wiley TDM full-text PDF downloads, with public Crossref identity checks.
 
-Wiley TDM provides the full-text PDF. Supporting information is discovered only
-from explicitly associated Crossref records, then fetched without API tokens.
+Wiley TDM provides the full-text PDF. Supporting information uses ANIE filename
+patterns or Crossref records and is fetched without API tokens.
 """
 from __future__ import annotations
 
@@ -441,10 +441,11 @@ def _process(client: _Client, reference: ArticleReference) -> DownloadResult:
         if client.config.include_supplements:
             discovery_started = True
             try:
-                descriptors, discovery = si.discover(client, doi, data["_crossref"])
+                groups, discovery = si.discover(client, doi, data["_crossref"])
                 record["supplement_discovery"] = discovery
-                result.supplements_total = len(descriptors)
-                record["supplements"] = [{key: value for key, value in item.items() if key != "request_url"} for item in descriptors]
+                result.supplements_total = len(groups)
+                record["supplements"] = [{key: value for key, value in group[0].items() if key != "request_url"}
+                                         for group in groups]
                 if discovery["status"] == "not_indexed":
                     result.supplements_status = "not_indexed"
                     record["errors"].append("Crossref 未检索到 SI 记录，不能据此确认论文没有附件；可打开文章页面人工查看。")
@@ -457,30 +458,20 @@ def _process(client: _Client, reference: ArticleReference) -> DownloadResult:
             except (DownloadCancelled, _BatchStopped):
                 raise
             except (AccessDenied, ValueError, OSError, requests.RequestException) as exc:
-                descriptors = []
+                groups = []
                 result.supplements_status = "discovery_failed"
                 message = "补充材料发现失败: " + _safe_error(exc, client.config)
                 record["supplement_discovery"] = {"source": "Crossref REST + UNIXSD", "status": "failed", "error": message}
                 record["errors"].append(message)
             old_assets = {asset.get("asset_key"): asset for asset in record["assets"].values() if asset.get("asset_key")}
             manual_total = 0
-            for index, descriptor in enumerate(descriptors):
+            for index, candidates in enumerate(groups):
                 _check_cancel(client.event)
-                if descriptor["status"] == "manual_required":
+                if candidates[0]["status"] == "manual_required":
                     manual_total += 1
                     continue
-                attachment_target = directory / descriptor["file"]
                 try:
-                    asset = si.reuse(client, descriptor, attachment_target, old_assets.get(descriptor["asset_key"], {}))
-                    if asset is None:
-                        asset = si.download(client, descriptor, attachment_target)
-                    if asset["status"] == "exists":
-                        result.supplements_existing += 1
-                    else:
-                        result.supplements_downloaded += 1
-                    record["supplements"][index] = asset
-                    record["assets"][asset["url"]] = asset
-                    _save_manifest(path, record)
+                    asset = si.fetch_attachment(client, candidates, directory, old_assets)
                 except DownloadCancelled:
                     record["supplements"][index].update({"status": "cancelled", "error": "用户取消下载。"})
                     raise
@@ -488,19 +479,26 @@ def _process(client: _Client, reference: ArticleReference) -> DownloadResult:
                     result.supplements_failed += 1
                     message = "补充材料: " + _safe_error(exc, client.config)
                     record["supplements"][index].update({"status": "access_denied" if isinstance(exc, AccessDenied) else "failed", "error": message})
-                    record["errors"].append(message)
-                    _save_manifest(path, record)
                     if isinstance(exc, _BatchStopped):
                         raise
-            if descriptors:
+                    if len(candidates) > 1:
+                        result.supplements_status = "incomplete"
+                        record["errors"].append("si下载未完成")
+                    else:
+                        record["errors"].append(message)
+                else:
+                    if asset["status"] == "exists":
+                        result.supplements_existing += 1
+                    else:
+                        result.supplements_downloaded += 1
+                    record["supplements"][index] = asset
+                    record["assets"][asset["url"]] = asset
+                _save_manifest(path, record)
+            if groups:
                 if manual_total:
                     record["errors"].append(f"有 {manual_total} 条关联附件记录需要人工确认或下载，来源链接见逐篇 JSON 清单。")
-                if result.supplements_failed or record["supplement_discovery"]["status"] == "partial":
-                    result.supplements_status = "partial"
-                elif manual_total:
-                    result.supplements_status = "manual_required"
-                else:
-                    result.supplements_status = "complete"
+                if not result.supplements_failed and discovery["status"] != "partial":
+                    result.supplements_status = "manual_required" if manual_total else "complete"
         main_ok = main_status in {"success", "exists"}
         if main_ok and result.supplements_status in {"disabled", "complete"}:
             result.status = "success" if main_status == "success" or result.supplements_downloaded else "exists"
@@ -548,7 +546,7 @@ def run_wiley_batch(records: list[ArticleReference], config: WileyConfig,
     manifest = output / f"manifest_wiley_{datetime.now():%Y%m%d_%H%M%S_%f}_{uuid.uuid4().hex[:6]}.csv"
     summary = BatchSummary([], manifest)
     with requests.Session() as session, manifest.open("x", encoding="utf-8-sig", newline="") as handle:
-        session.headers.update({"User-Agent": "PaperCollections/1.7 (Wiley TDM PDF and Crossref supplements)"})
+        session.headers.update({"User-Agent": "PaperCollections/1.7 (Wiley TDM PDF and supplements)"})
         client = _Client(session, config, event)
         writer = csv.DictWriter(handle, fieldnames=list(DownloadResult.__dataclass_fields__))
         writer.writeheader()
