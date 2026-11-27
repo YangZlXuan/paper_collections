@@ -28,7 +28,7 @@ from .downloader import (
 from .elsevier import ElsevierConfig, exclude_downloaded_references, run_elsevier_batch, validate_elsevier_config
 from .request_quota import RequestQuotaError, get_request_quotas
 from .settings import load_settings, save_settings
-from .search import SearchConfig, SearchResult, search_articles, validate_search_config
+from .search import SearchConfig, SearchResult, search_articles, validate_search_config, wiley_website_search_url
 from .updates import UpdateCheckError, UpdateResult, check_for_update
 from .wiley import MIN_WILEY_INTERVAL, WileyConfig, parse_wiley_interval, run_wiley_batch, validate_wiley_config
 
@@ -42,6 +42,24 @@ STATUS_LABELS = {
     "partial": "部分完成", "no_pdf": "未找到正文", "access_denied": "访问受限",
     "filtered": "不符合筛选", "failed": "失败", "cancelled": "已取消", "import_only": "仅导入",
 }
+
+
+def _bind_modal_grab(dialog: tk.Toplevel) -> None:
+    """Keep input modal only while the dialog is visible."""
+    def sync_grab(event: tk.Event | None = None) -> None:
+        if event is not None and event.widget is not dialog:
+            return
+        if dialog.winfo_viewable():
+            if dialog.grab_current() is None:
+                dialog.grab_set()
+        elif dialog.grab_current() is dialog:
+            # A hidden transient holding the grab blocks the Windows taskbar's
+            # SC_RESTORE command. Reacquire it when the dialog is mapped again.
+            dialog.grab_release()
+
+    dialog.bind("<Map>", sync_grab, add="+")
+    dialog.bind("<Unmap>", sync_grab, add="+")
+    sync_grab()
 
 
 class DownloaderApp(tk.Tk):
@@ -767,7 +785,7 @@ class DownloaderApp(tk.Tk):
         ttk.Button(buttons, text="取消", command=close).pack(side="right")
         ttk.Button(buttons, text="解析并导入", style="Primary.TButton", command=import_text).pack(side="right", padx=8)
         dialog.protocol("WM_DELETE_WINDOW", close)
-        dialog.grab_set()
+        _bind_modal_grab(dialog)
         editor.focus_set()
 
     @staticmethod
@@ -911,7 +929,7 @@ class DownloaderApp(tk.Tk):
 
         ttk.Button(footer, text="完成", style="Primary.TButton", command=save_and_close).pack(side="right")
         dialog.protocol("WM_DELETE_WINDOW", close)
-        dialog.grab_set()
+        _bind_modal_grab(dialog)
 
     def _save_api_credentials(self) -> bool:
         try:
@@ -1088,6 +1106,8 @@ class DownloaderApp(tk.Tk):
                 elif kind == "search_log":
                     if event[1] is self._search_token:
                         self._log(event[2])
+                        if self._search_dialog is not None and self._search_dialog.running and not self._cancel.is_set():
+                            self._search_dialog.status_var.set(event[2])
                 elif kind == "searched":
                     self._finish_search(*event[1:])
                 elif kind == "parsed":
@@ -1487,12 +1507,14 @@ class _KeywordSearchDialog(tk.Toplevel):
         form = ttk.Frame(self, padding=16)
         form.grid(row=0, column=0, sticky="ew")
         form.grid_columnconfigure(1, weight=1)
-        ttk.Label(form, text=f"{publisher.name} · {journal or ALL_JOURNALS}", wraplength=900).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 10))
+        ttk.Label(form, text=f"{publisher.name} · {journal or ALL_JOURNALS}", wraplength=620).grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 10))
         defaults = app._search_defaults
         self.keywords_var = tk.StringVar(value=defaults.get("keywords", ""))
         self.year_from_var = tk.StringVar(value=defaults.get("year_from", ""))
         self.year_to_var = tk.StringVar(value=defaults.get("year_to", ""))
         self.max_results_var = tk.StringVar(value=defaults.get("max_results", "100"))
+        self.scoped_max_var = tk.StringVar(value=defaults.get("wiley_scoped_max", "6000"))
+        self.title_abstract_var = tk.BooleanVar(value=publisher.id == "wiley" and defaults.get("wiley_scope") == "title_abstract")
         same_source = defaults.get("publisher_id") == publisher.id and defaults.get("journal") == journal
         self.start_position_var = tk.StringVar(value=defaults.get("start_position", "1") if same_source else "1")
         self.skip_downloaded_var = tk.BooleanVar(value=defaults.get("skip_downloaded", "true") != "false")
@@ -1512,7 +1534,8 @@ class _KeywordSearchDialog(tk.Toplevel):
         ttk.Label(form, text="最多获取").grid(row=2, column=2, padx=(10, 6), pady=(10, 0))
         max_entry = ttk.Entry(form, textvariable=self.max_results_var, width=6)
         max_entry.grid(row=2, column=3, pady=(10, 0))
-        ttk.Label(form, text="篇（1–1000）").grid(row=2, column=4, sticky="w", padx=6, pady=(10, 0))
+        max_hint = ttk.Label(form, text="篇（1–1000）")
+        max_hint.grid(row=2, column=4, sticky="w", padx=6, pady=(10, 0))
         self.search_button = ttk.Button(form, text="开始检索", command=self.start, style="Primary.TButton")
         self.search_button.grid(row=2, column=5, sticky="e", pady=(10, 0))
         ttk.Label(form, text="起始序号").grid(row=3, column=0, sticky="w", pady=(10, 0))
@@ -1522,10 +1545,34 @@ class _KeywordSearchDialog(tk.Toplevel):
         self.continue_button = ttk.Button(form, text="继续检索下一批", command=self.continue_search, state="disabled")
         self.continue_button.grid(row=3, column=5, sticky="e", pady=(10, 0))
         self.skip_downloaded_check = ttk.Checkbutton(form, text="Elsevier：跳过保存目录中已完成的文献（PDF / XML）", variable=self.skip_downloaded_var)
-        self.skip_downloaded_check.grid(row=4, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        if publisher.id == "wiley":
+            self.scope_check = ttk.Checkbutton(form, text="标题或摘要", variable=self.title_abstract_var)
+            self.scope_check.grid(row=0, column=5, sticky="e", pady=(0, 10))
+            self.search_button.configure(text="检索 Wiley SRU")
+            self.website_button = ttk.Button(form, text="在 Wiley 官网检索", command=self._open_wiley_website)
+            self.website_button.grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+            website_hint = ttk.Label(form)
+            website_hint.grid(row=4, column=2, columnspan=4, sticky="w", pady=(10, 0))
+
+            def show_scope(*change: object) -> None:
+                scoped = self.title_abstract_var.get()
+                max_entry.configure(textvariable=self.scoped_max_var if scoped else self.max_results_var)
+                max_hint.configure(text="篇（1–6000）" if scoped else "篇（1–1000）")
+                self.website_button.configure(state="disabled" if scoped else "normal")
+                website_hint.configure(text="标题或摘要由 SRU 合并检索，按 DOI 去重。" if scoped else
+                                       "官网结果可导出 RIS，在主窗口“选择文件”导入。")
+                if change:
+                    self.start_position_var.set("1")  # A different scope starts a new result set.
+
+            show_scope()
+            self.title_abstract_var.trace_add("write", show_scope)
+        else:
+            self.skip_downloaded_check.grid(row=4, column=0, columnspan=6, sticky="w", pady=(10, 0))
         if publisher.id != "elsevier":
             self.skip_downloaded_check.configure(state="disabled")
         self._inputs = (keyword_entry, year_from_entry, year_to_entry, max_entry, self.start_position_entry, self.skip_downloaded_check)
+        if publisher.id == "wiley":
+            self._inputs += (self.scope_check,)
         self.status_var = tk.StringVar(value="检索仅获取文献列表；导入选中记录后，回主界面点击“开始下载”。")
         ttk.Label(self, textvariable=self.status_var, wraplength=900, padding=(16, 0, 16, 10)).grid(row=1, column=0, sticky="ew")
         self.bind("<Configure>", lambda event: self._resize_hint(event))
@@ -1567,13 +1614,13 @@ class _KeywordSearchDialog(tk.Toplevel):
         self.cancel_button = ttk.Button(actions, text="取消检索", command=self.cancel, state="disabled")
         self.cancel_button.pack(side="right", padx=6)
         ttk.Button(actions, text="关闭", command=self.close).pack(side="right")
-        for variable in (self.keywords_var, self.year_from_var, self.year_to_var, self.max_results_var, self.start_position_var, self.skip_downloaded_var):
+        for variable in (self.keywords_var, self.year_from_var, self.year_to_var, self.max_results_var, self.scoped_max_var, self.start_position_var, self.skip_downloaded_var):
             variable.trace_add("write", self._query_changed)
         self.journal_filter_var.trace_add("write", self._apply_journal_filter)
         self._update_continue_state()
         if self._next_cursor is not None:
             self.status_var.set(f"已保留上批位置；点击“继续检索下一批”将从第 {self._next_cursor + 1} 条开始。")
-        self.grab_set()
+        _bind_modal_grab(self)
         keyword_entry.focus_set()
 
     def _resize_hint(self, event: tk.Event) -> None:
@@ -1657,6 +1704,30 @@ class _KeywordSearchDialog(tk.Toplevel):
         self.start_position_var.set(str(position))
         self.start()
 
+    def _open_wiley_website(self) -> None:
+        try:
+            year_from, year_to = self._years()
+            config = SearchConfig("wiley", self.keywords_var.get(), self.journal, year_from, year_to,
+                                  wiley_title_or_abstract=self.title_abstract_var.get())
+            url = wiley_website_search_url(config)
+        except ValueError as exc:
+            messagebox.showerror("检索条件无效", str(exc), parent=self)
+            return
+        try:
+            opened = webbrowser.open(url, new=2)
+        except (OSError, webbrowser.Error):
+            opened = False
+        if not opened:
+            messagebox.showerror("无法打开 Wiley 官网", f"请将以下地址复制到浏览器：\n{url}", parent=self)
+
+    def _years(self) -> tuple[int | None, int | None]:
+        try:
+            year_from = int(self.year_from_var.get()) if self.year_from_var.get().strip() else None
+            year_to = int(self.year_to_var.get()) if self.year_to_var.get().strip() else None
+        except ValueError:
+            raise ValueError("年份须为四位数字，留空表示不限。") from None
+        return year_from, year_to
+
     def set_running(self, value: bool) -> None:
         self.running = value
         for widget in (*self._inputs, self.search_button, self.select_all_button, self.deselect_button):
@@ -1674,9 +1745,8 @@ class _KeywordSearchDialog(tk.Toplevel):
         if self.running or self.app._busy or self.app._closing:
             return
         try:
-            year_from = int(self.year_from_var.get()) if self.year_from_var.get().strip() else None
-            year_to = int(self.year_to_var.get()) if self.year_to_var.get().strip() else None
-            maximum = int(self.max_results_var.get())
+            year_from, year_to = self._years()
+            maximum = int((self.scoped_max_var if self.title_abstract_var.get() else self.max_results_var).get())
             start_position = int(self.start_position_var.get())
         except ValueError:
             messagebox.showerror("检索条件无效", "年份、获取篇数和起始序号应为整数；年份可留空。", parent=self)
@@ -1684,13 +1754,18 @@ class _KeywordSearchDialog(tk.Toplevel):
         try:
             interval = parse_wiley_interval(self.app.interval_var.get()) if self.publisher.id == "wiley" else parse_request_interval(self.app.interval_var.get())
             key = self.app.springer_meta_key_var.get().strip() if self.publisher.id == "springer" else self.app.api_key_var.get().strip() if self.publisher.id == "elsevier" else ""
-            config = SearchConfig(publisher_id=self.publisher.id, keywords=self.keywords_var.get().strip(), journal=self.journal, year_from=year_from, year_to=year_to, max_results=maximum, start_offset=start_position - 1, interval=interval, api_key=key, insttoken=self.app.insttoken_var.get().strip() if self.publisher.id == "elsevier" else "")
+            config = SearchConfig(publisher_id=self.publisher.id, keywords=self.keywords_var.get().strip(), journal=self.journal,
+                                  year_from=year_from, year_to=year_to, max_results=maximum, start_offset=start_position - 1,
+                                  interval=interval, api_key=key, insttoken=self.app.insttoken_var.get().strip() if self.publisher.id == "elsevier" else "",
+                                  wiley_title_or_abstract=self.title_abstract_var.get())
             validate_search_config(config)
         except ValueError as exc:
             messagebox.showerror("检索条件无效", self.app._redact_secrets(str(exc)), parent=self)
             return
         self.app._search_defaults = {"keywords": self.keywords_var.get(), "year_from": self.year_from_var.get(),
             "year_to": self.year_to_var.get(), "max_results": self.max_results_var.get(),
+            "wiley_scope": "title_abstract" if self.title_abstract_var.get() else "anywhere",
+            "wiley_scoped_max": self.scoped_max_var.get(),
             "start_position": self.start_position_var.get(), "publisher_id": self.publisher.id, "journal": self.journal,
             "skip_downloaded": "true" if self.skip_downloaded_var.get() else "false"}
         self._next_cursor = None

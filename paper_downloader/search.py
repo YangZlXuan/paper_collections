@@ -30,6 +30,27 @@ from .request_quota import RequestQuotaError, reserve_api_request
 SPRINGER_ENDPOINT = "https://api.springernature.com/meta/v2/json"
 ELSEVIER_ENDPOINT = "https://api.elsevier.com/content/search/sciencedirect"
 WILEY_ENDPOINT = "https://onlinelibrary.wiley.com/action/sru"
+# Wiley's advanced-search form identifies a publication by its online ISSN
+# without punctuation. A title in the keyword field has a different scope.
+_WILEY_PUBLICATIONS = {
+    "Advanced Materials": "15214095",
+    "Advanced Energy Materials": "16146840",
+    "Carbon Energy": "26379368",
+    "Advanced Functional Materials": "16163028",
+    "InfoMat": "25673165",
+    "SusMat": "26924552",
+    "Angewandte Chemie International Edition": "15213773",
+    "Aggregate": "26924560",
+    "SmartMat": "2688819X",
+    "Advanced Science": "21983844",
+    "Energy & Environmental Materials": "25750356",
+    "Small": "16136829",
+    "Small Structures": "26884062",
+    "Small Methods": "23669608",
+    "Small Science": "26884046",
+    "ChemSusChem": "1864564X",
+    "ChemElectroChem": "21960216",
+}
 _ENDPOINTS = {"springer": SPRINGER_ENDPOINT, "elsevier": ELSEVIER_ENDPOINT, "wiley": WILEY_ENDPOINT}
 _SOURCES = {"springer": "Springer Meta API", "elsevier": "ScienceDirect Search API v2", "wiley": "Wiley SRU"}
 _MAX_BODY = 8 * 1024 * 1024
@@ -60,6 +81,7 @@ class SearchConfig:
     api_key: str = field(default="", repr=False)
     insttoken: str = field(default="", repr=False)
     start_offset: int = 0
+    wiley_title_or_abstract: bool = False
 
 
 @dataclass
@@ -95,8 +117,11 @@ def validate_search_config(config: SearchConfig) -> None:
             raise SearchError("年份须为四位数字，留空表示不限。")
     if config.year_from is not None and config.year_to is not None and config.year_from > config.year_to:
         raise SearchError("开始年份不能晚于结束年份。")
-    if isinstance(config.max_results, bool) or not isinstance(config.max_results, int) or not 1 <= config.max_results <= 1000:
-        raise SearchError("检索篇数上限须为 1–1000 的整数。")
+    if config.wiley_title_or_abstract and config.publisher_id != "wiley":
+        raise SearchError("标题或摘要检索范围仅适用于 Wiley。")
+    limit = _MAX_SCANNED if config.wiley_title_or_abstract else 1000
+    if isinstance(config.max_results, bool) or not isinstance(config.max_results, int) or not 1 <= config.max_results <= limit:
+        raise SearchError(f"检索篇数上限须为 1–{limit} 的整数。")
     if isinstance(config.start_offset, bool) or not isinstance(config.start_offset, int) or not 0 <= config.start_offset < _MAX_SCANNED:
         raise SearchError("起始序号须为 1–6000 的整数。")
     for name, value, minimum, maximum in (("请求间隔", config.interval, 2, 60), ("请求超时", config.timeout, 1, 300)):
@@ -368,8 +393,62 @@ def _cql(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def _wiley_keywords(value: str, index: str = "cql.anywhere") -> str:
+    # Only uppercase operators outside a quoted phrase switch to Boolean search.
+    # Preserve parentheses inside ordinary chemical names such as Zn(II).
+    quoted = r'"(?:[^"\\]|\\.)*"'
+    tokens = [part.strip() for part in re.split(
+        rf'({quoted}|[()]|(?<![^\s()"])(?:AND|OR)(?![^\s()"]))', value) if part.strip()]
+
+    def clause(term: str) -> str:
+        parts = []
+        # Wiley's website joins unquoted words with AND. Quoting the whole
+        # input here would silently turn a keyword search into a phrase search.
+        for word in re.findall(rf'{quoted}|[^\s"]+|"', term):
+            if word == '"':
+                raise SearchError("Wiley 检索双引号未闭合，请检查关键词。")
+            if re.fullmatch(quoted, word):
+                word = re.sub(r'\\(["\\])', r'\1', word[1:-1])
+            if not word.strip():
+                raise SearchError("Wiley 检索短语不能为空。")
+            parts.append(index + "=" + _cql(word))
+        if not parts:
+            raise SearchError("Wiley 检索短语不能为空。")
+        return "(" + " and ".join(parts) + ")" if len(parts) > 1 else parts[0]
+
+    if not any(token in {"AND", "OR"} for token in tokens):
+        return clause(value)
+
+    parts = []
+    depth, need_term = 0, True
+    for token in tokens:
+        if token == "(" and need_term:
+            depth += 1
+        elif token == ")" and depth and not need_term:
+            depth -= 1
+        elif token in {"AND", "OR"} and not need_term:
+            token, need_term = token.lower(), True
+        elif need_term and token not in {"(", ")", "AND", "OR"} and ('"' not in token or re.fullmatch(quoted, token)):
+            token, need_term = clause(token), False
+        else:
+            raise SearchError("Wiley 布尔检索格式有误，请用 AND / OR 连接关键词，并检查双引号和括号。")
+        parts.append(token)
+    if depth or need_term:
+        raise SearchError("Wiley 布尔检索不完整，请检查括号和运算符两侧的关键词。")
+    # Keep optional journal/date restrictions outside the whole expression.
+    return "(" + " ".join(parts) + ")"
+
+
 def _wiley_query(config: SearchConfig) -> str:
-    parts = ["cql.anywhere=" + _cql(config.keywords.strip())]
+    keywords = config.keywords.strip()
+    if config.wiley_title_or_abstract:
+        # Match the whole expression in either field, as in two separate
+        # field searches. A few words in each field do not satisfy an AND.
+        title = _wiley_keywords(keywords, "dc.title")
+        abstract = _wiley_keywords(keywords, "dc.description")
+        parts = [f"({title} or {abstract})"]
+    else:
+        parts = [_wiley_keywords(keywords)]
     if config.journal.strip():
         parts.append("dcterms.isPartOf=" + _cql(config.journal.strip()))
     if config.year_from is not None:
@@ -377,6 +456,26 @@ def _wiley_query(config: SearchConfig) -> str:
     if config.year_to is not None:
         parts.append(f'dc.date <= "{config.year_to}-12-31"')
     return " and ".join(parts)
+
+
+def wiley_website_search_url(config: SearchConfig) -> str:
+    """Submit the original text to the same Anywhere field as Wiley's website."""
+    validate_search_config(config)
+    if config.wiley_title_or_abstract:
+        raise SearchError("请使用“检索 Wiley SRU”一次查询标题或摘要。")
+    params = {"field1": "AllField", "text1": config.keywords.strip(),
+              "field2": "AllField", "text2": "", "field3": "AllField", "text3": ""}
+    if config.journal:
+        publication = _WILEY_PUBLICATIONS.get(config.journal)
+        if not publication:
+            raise SearchError("该期刊缺少 Wiley 官网的期刊标识，无法按所选期刊检索。")
+        params["publication[]"] = publication.lower()
+    params.update(publication="", Ppub="")
+    if config.year_from is not None:
+        params.update(AfterMonth="1", AfterYear=str(config.year_from))
+    if config.year_to is not None:
+        params.update(BeforeMonth="12", BeforeYear=str(config.year_to))
+    return "https://onlinelibrary.wiley.com/action/doSearch?" + urlencode(params)
 
 
 def _tag(element: ET.Element) -> str:
@@ -436,10 +535,14 @@ def _wiley_page(client: _Client, start: int, count: int) -> tuple[list[dict], in
             continue
         titles, dates = _texts(data, "title"), _texts(data, "date")
         identifiers = _texts(data, "identifier")
-        # DC identifiers can include unrelated non-DOI IDs. Only a single DOI is
-        # accepted; the article URL is rebuilt from that identifier later.
-        dois = list(dict.fromkeys(doi for value in identifiers if (doi := _doi_identifier(value))))
-        entries.append({"doi": dois[0] if len(dois) == 1 else "", "pii": "",
+        # Wiley also lists articles under virtual issues, appending the
+        # collection identifier to the article DOI. Keep ordinary @ in DOIs.
+        dois = set()
+        for value in identifiers:
+            doi = _doi_identifier(value)
+            if doi:
+                dois.add(re.sub(r"@10\.\d{4,9}/\(issn\)\d{4}-\d{3}[\dx]\.[^\s]+$", "", doi))
+        entries.append({"doi": dois.pop() if len(dois) == 1 else "", "pii": "",
                         "title": titles[0] if titles else "", "journals": _texts(data, "isPartOf"),
                         "date": dates[0] if dates else "", "abstract": " ".join(_texts(data, "description")),
                         "publication_type": " ".join(_texts(data, "type"))})
@@ -492,6 +595,7 @@ def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None =
     start = config.start_offset + position_base
     fetch = {"springer": _springer_page, "elsevier": _elsevier_page, "wiley": _wiley_page}[config.publisher_id]
     page_size = 25 if config.publisher_id == "elsevier" else 20
+    page_limit = _MAX_SCANNED // page_size if config.wiley_title_or_abstract and config.max_results > 1000 else _MAX_PAGES
     visited: set[tuple] = set()
     by_doi: dict[str, ArticleReference] = {}
     by_pii: dict[str, ArticleReference] = {}
@@ -502,7 +606,7 @@ def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None =
             session.trust_env = False
             session.headers.update({"User-Agent": "PaperCollections/1.9 (publisher keyword discovery)"})
             client = _Client(session, config, event)
-            for page in range(_MAX_PAGES):
+            for page in range(page_limit):
                 result.next_cursor = start - position_base
                 _check_cancel(event)
                 rows, total, next_page = fetch(client, start, page_size)
@@ -575,7 +679,7 @@ def search_articles(config: SearchConfig, on_log: Callable[[str], None] | None =
                     break
                 next_offset = next_page - position_base
                 result.next_cursor = next_offset if next_offset < _MAX_SCANNED else None
-                if scanned >= _MAX_SCANNED or next_offset >= _MAX_SCANNED or page == _MAX_PAGES - 1:
+                if scanned >= _MAX_SCANNED or next_offset >= _MAX_SCANNED or page == page_limit - 1:
                     result.truncated = True
                     _warn(result, "已达到本次安全分页上限，结果可能不完整；可继续下一批或缩小年份范围。")
                     break

@@ -75,6 +75,51 @@ class GuiWorkflowTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("GUI worker did not finish within the test timeout")
 
+    @unittest.skipUnless(os.name == "nt", "Windows taskbar restore command")
+    def test_modal_dialogs_allow_taskbar_restore_after_minimize(self):
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetParent.argtypes = [wintypes.HWND]
+        user32.GetParent.restype = wintypes.HWND
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        self.app.deiconify()
+        self.app.update()
+        hwnd = user32.GetParent(self.app.winfo_id())
+        for open_dialog, attribute in (
+            (self.app._show_search_dialog, "_search_dialog"),
+            (self.app._show_paste_dialog, "_paste_dialog"),
+            (self.app._show_access_settings, "_access_dialog"),
+        ):
+            with self.subTest(dialog=attribute):
+                open_dialog()
+                dialog = getattr(self.app, attribute)
+                try:
+                    self.app.update()
+                    self.assertIs(self.app.grab_current(), dialog)
+                    for _ in range(2):
+                        self.app.iconify()
+                        self.app.update()
+                        self.assertEqual(self.app.state(), "iconic")
+                        self.assertFalse(dialog.winfo_viewable())
+                        # Exercise the Windows restore command, not Tk's
+                        # deiconify(), which bypasses the blocked command.
+                        self.assertTrue(user32.PostMessageW(hwnd, 0x0112, 0xF120, 0))
+                        deadline = time.monotonic() + 1
+                        while self.app.state() == "iconic" and time.monotonic() < deadline:
+                            self.app.update()
+                            time.sleep(0.01)
+                        self.assertEqual(self.app.state(), "normal", "The modal dialog blocked SC_RESTORE")
+                        self.app.update()
+                        self.assertTrue(dialog.winfo_viewable())
+                        self.assertIs(self.app.grab_current(), dialog)
+                finally:
+                    dialog.destroy()
+                    setattr(self.app, attribute, None)
+                    self.app.deiconify()
+                    self.app.update()
+
     def parse(self):
         self.app.file_var.set(str(self.source))
         self.app._parse_file()

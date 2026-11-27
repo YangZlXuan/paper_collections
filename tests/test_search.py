@@ -302,8 +302,74 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(query["version"], ["1.2"])
         self.assertEqual(query["maximumRecords"], ["20"])
         self.assertEqual(query["startRecord"], ["1"])
-        self.assertEqual(query["query"], ['cql.anywhere="oxygen \\"evolution\\"" and dcterms.isPartOf="Advanced Materials" and dc.date >= "2020-01-01" and dc.date <= "2025-12-31"'])
+        self.assertEqual(query["query"], ['(cql.anywhere="oxygen" and cql.anywhere="evolution") and dcterms.isPartOf="Advanced Materials" and dc.date >= "2020-01-01" and dc.date <= "2025-12-31"'])
         self.assertFalse(any("key" in name.lower() or "wiley" in name.lower() for name in request.headers))
+
+    def test_wiley_unquoted_words_match_explicit_and_but_not_a_phrase(self):
+        queries = []
+        for keywords in ("Oxygen Evolution Reaction", "Oxygen AND Evolution AND Reaction",
+                         '"Oxygen Evolution Reaction"'):
+            self.config = search.SearchConfig("wiley", keywords,
+                journal="Angewandte Chemie International Edition", year_from=2020)
+            _, session = self.run_fake([wiley(total=0)])
+            queries.append(parse_qs(urlsplit(session.calls[0][0].url).query)["query"][0])
+        self.assertEqual(queries[0], queries[1])
+        self.assertNotEqual(queries[0], queries[2])
+        self.assertIn('cql.anywhere="Oxygen Evolution Reaction"', queries[2])
+        for query in queries:
+            self.assertTrue(query.endswith(
+                'and dcterms.isPartOf="Angewandte Chemie International Edition" and dc.date >= "2020-01-01"'))
+
+    def test_wiley_grouped_boolean_keywords_with_filters(self):
+        keywords = ('("aqueous zinc-ion batteries" OR "aqueous zinc batteries" OR "aqueous Zn batteries") '
+                    'AND ("electrolyte additive" OR "organic additive")')
+        self.config = search.SearchConfig("wiley", keywords, journal="Advanced Materials", year_from=2020)
+        _, session = self.run_fake([wiley(total=0)])
+        query = parse_qs(urlsplit(session.calls[0][0].url).query)["query"][0]
+        self.assertEqual(query, (
+            '(( cql.anywhere="aqueous zinc-ion batteries" or cql.anywhere="aqueous zinc batteries" '
+            'or cql.anywhere="aqueous Zn batteries" ) and ( cql.anywhere="electrolyte additive" '
+            'or cql.anywhere="organic additive" )) and dcterms.isPartOf="Advanced Materials" and dc.date >= "2020-01-01"'))
+
+    def test_wiley_title_or_abstract_repeats_expression_and_merges_dois_across_pages(self):
+        self.config = search.SearchConfig("wiley", 'Oxygen Evolution Reaction OR "water oxidation"',
+            journal="Advanced Materials", year_to=2025, wiley_title_or_abstract=True)
+        # Same article appears under a thematic collection and its canonical DOI.
+        rows = [wiley(wrow("10.1002/Article-A@10.1002/(ISSN)1521-3773.maxplanckday"), total=4, next_position=2),
+                wiley(wrow("https://doi.org/10.1002/ARTICLE-A") + wrow("10.1002/article-b") +
+                      wrow("10.1002/ordinary@symbol"), total=4)]
+        result, session = self.run_fake(rows)
+        self.assertEqual([r.doi for r in result.records],
+                         ["10.1002/article-a", "10.1002/article-b", "10.1002/ordinary@symbol"])
+        self.assertEqual(result.total, 4)
+        self.assertIsNone(result.next_cursor)
+        expression = '(({i}="Oxygen" and {i}="Evolution" and {i}="Reaction") or {i}="water oxidation")'
+        expected = (f'({expression.format(i="dc.title")} or {expression.format(i="dc.description")})'
+                    ' and dcterms.isPartOf="Advanced Materials" and dc.date <= "2025-12-31"')
+        for request, _ in session.calls:
+            self.assertEqual(parse_qs(urlsplit(request.url).query)["query"], [expected])
+
+    def test_wiley_title_or_abstract_collects_more_than_one_thousand_in_one_search(self):
+        self.config = search.SearchConfig("wiley", "Oxygen Evolution Reaction", max_results=6000,
+                                         wiley_title_or_abstract=True)
+        total = 1003
+        pages = [wiley("".join(wrow(f"10.1002/{i}") for i in range(start, min(start + 20, total))), total=total)
+                 for start in range(0, total, 20)]
+        result, _ = self.run_fake(pages)
+        self.assertEqual(len(result.records), total)
+        self.assertFalse(result.truncated)
+        self.assertIsNone(result.next_cursor)
+
+    def test_wiley_literal_keywords_and_invalid_expressions(self):
+        for keywords, expected in [('Zn(II) salts', '(cql.anywhere="Zn(II)" and cql.anywhere="salts")'),
+                                   ('"rock AND roll"', 'cql.anywhere="rock AND roll"'),
+                                   ('"A OR B" AND zinc ion', '(cql.anywhere="A OR B" and (cql.anywhere="zinc" and cql.anywhere="ion"))'),
+                                   ('oxygen "evolution reaction"', '(cql.anywhere="oxygen" and cql.anywhere="evolution reaction")')]:
+            with self.subTest(keywords=keywords):
+                self.assertEqual(search._wiley_query(search.SearchConfig("wiley", keywords)), expected)
+        for keywords in ('zinc OR', '(zinc OR salt', 'zinc AND OR salt', 'zinc AND "unfinished'):
+            with self.subTest(keywords=keywords), self.assertRaisesRegex(search.SearchError, "布尔检索"):
+                search._wiley_query(search.SearchConfig("wiley", keywords))
 
     def test_wiley_next_position_and_multiple_ispartof(self):
         self.config = search.SearchConfig("wiley", "water", journal="Advanced Materials", retries=0)

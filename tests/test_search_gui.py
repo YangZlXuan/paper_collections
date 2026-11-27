@@ -4,6 +4,7 @@ import csv
 import threading
 import unittest
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from paper_downloader import gui
 from paper_downloader.doi_parser import ArticleReference
@@ -412,6 +413,54 @@ class KeywordSearchGuiTests(unittest.TestCase):
             self.assertGreaterEqual(widget.winfo_rooty(), dialog.winfo_rooty())
             self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(), dialog.winfo_rootx() + dialog.winfo_width())
             self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), dialog.winfo_rooty() + dialog.winfo_height())
+
+    def test_wiley_scope_switch_starts_from_one_and_reopens_with_same_scope(self):
+        dialog = self.open_search("wiley")
+        dialog.max_results_var.set("23")
+        self.complete_search(dialog, SearchResult([], next_cursor=75))
+        dialog.start_position_var.set("76")
+        dialog.scope_check.invoke()
+        self.assertEqual(dialog.start_position_var.get(), "1")
+        self.assertTrue(dialog.website_button.instate(["disabled"]))
+        with patch.object(gui, "search_articles", return_value=SearchResult([], next_cursor=120)) as run:
+            dialog.search_button.invoke()
+            self.wait_for(lambda: not self.app._busy)
+        config = run.call_args.args[0]
+        self.assertEqual((config.wiley_title_or_abstract, config.start_offset, config.max_results), (True, 0, 6000))
+        dialog.close()
+        self.app._show_search_dialog()
+        dialog = self.app._search_dialog
+        self.assertTrue(dialog.title_abstract_var.get())
+        self.assertEqual(dialog._next_cursor, 120)
+        dialog.scope_check.invoke()
+        self.assertIsNone(dialog._next_cursor)
+        self.assertFalse(dialog.website_button.instate(["disabled"]))
+        self.assertEqual(dialog.max_results_var.get(), "23")
+
+    def test_wiley_browser_search_matches_website_form(self):
+        journal = "Angewandte Chemie International Edition"
+        dialog = self.open_search("wiley")
+        dialog.close()
+        self.app.journal_var.set(journal)
+        dialog = self.open_search("wiley")
+        dialog.keywords_var.set("Oxygen Evolution Reaction")
+        with patch.object(gui.webbrowser, "open", return_value=True) as browser:
+            dialog.website_button.invoke()
+            self.assertEqual(browser.call_args.args[0],
+                "https://onlinelibrary.wiley.com/action/doSearch?field1=AllField&text1=Oxygen+Evolution+Reaction"
+                "&field2=AllField&text2=&field3=AllField&text3=&publication%5B%5D=15213773&publication=&Ppub=")
+            expression = '("aqueous Zn batteries" OR "zinc & water") AND additive'
+            dialog.keywords_var.set(expression)
+            dialog.year_to_var.set("2024")
+            dialog.website_button.invoke()
+            params = parse_qs(urlsplit(browser.call_args.args[0]).query)
+            self.assertEqual(params["text1"], [expression])
+            self.assertEqual((params["BeforeYear"], params["BeforeMonth"]), (["2024"], ["12"]))
+            self.assertNotIn("AfterYear", params)
+            dialog.year_from_var.set("2025")
+            dialog.website_button.invoke()
+            self.assertEqual(browser.call_count, 2)
+            self.errors.assert_called_once()
 
 
     def test_manual_start_position_1001_reaches_search_config(self):
